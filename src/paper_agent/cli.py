@@ -23,6 +23,7 @@ from paper_agent.llm import chat
 from paper_agent.models import normalize_title
 from paper_agent.parsing import SUPPORTED_SUFFIXES, extract_markdown
 from paper_agent.rag.embedder import embed
+from paper_agent.rag.qa import Retriever, answer_question
 from paper_agent.rag.splitter import chunk_abstract, split_markdown
 from paper_agent.rag.vectorstore import VectorStore
 from paper_agent.sources import SourceUnavailable
@@ -396,6 +397,72 @@ def index(
         console.print(f"\n索引完成：{ok} 篇入库，向量库共 {store.count()} 块{extra}")
     finally:
         lib.close()
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(None, help="问题；缺省进入多轮问答 REPL"),
+    paper: str = typer.Option("", "--paper", "-p", help="限定在某篇论文内回答（id 片段）"),
+    k: int = typer.Option(5, "--k", min=1, help="检索块数"),
+) -> None:
+    """文献库问答：检索 top-k → 带出处回答；范围外明确回答「未提及」。"""
+    cfg = load_config()
+    paper_id = None
+    if paper:
+        lib = _library(cfg)
+        try:
+            matches = lib.find(paper)
+            if not matches:
+                console.print(f"{FAIL} 未找到论文「{paper}」")
+                raise typer.Exit(code=1)
+            if len(matches) > 1:
+                console.print(f"{FAIL} 「{paper}」匹配多条（{', '.join(matches)}），请用更完整的 id")
+                raise typer.Exit(code=1)
+            paper_id = matches[0]
+        finally:
+            lib.close()
+
+    store = VectorStore(_data_dir(cfg) / "db")
+    if store.count() == 0:
+        console.print("向量库为空：先运行 [cyan]pa index --all[/cyan] 建立索引。")
+        return
+    retriever = Retriever(store)
+
+    if question:
+        _answer_once(question, retriever, k=k, paper_id=paper_id)
+        return
+
+    scope = f"（限定：{paper_id}）" if paper_id else "（全库）"
+    console.print(f"[bold]多轮问答模式{scope}[/bold]，输入问题回车作答，[cyan]q[/cyan] 退出。")
+    history: list[tuple[str, str]] = []
+    while True:
+        try:
+            q = console.input("[bold cyan]问题> [/bold cyan]").strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not q or q.lower() in ("q", "quit", "exit"):
+            break
+        answer = _answer_once(q, retriever, k=k, paper_id=paper_id, history=history)
+        history.append((q, answer))
+
+
+def _answer_once(
+    question: str,
+    retriever: Retriever,
+    *,
+    k: int,
+    paper_id: str | None,
+    history: list[tuple[str, str]] | None = None,
+) -> str:
+    try:
+        answer, _hits = answer_question(
+            question, retriever=retriever, history=history, k=k, paper_id=paper_id
+        )
+    except RuntimeError as exc:  # 缺 Key 等配置问题
+        console.print(f"{FAIL} {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[bold]答[/bold] {answer}\n")
+    return answer
 
 
 @app.command()
