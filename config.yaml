@@ -2,14 +2,15 @@
 # 切换 LLM 平台：改 base_url 和 model；API Key 一律放 .env，不写进本文件。
 
 llm:
-  base_url: https://api.siliconflow.cn/v1
-  # 硅基流动按量计费模型；实测后可按性价比调整
-  model: deepseek-ai/DeepSeek-V3
-  api_key_env: LLM_API_KEY
+  # 智谱 OpenAI 兼容端点；glm-4-flash 为免费档。若提示模型不存在，
+  # 请到智谱控制台（https://open.bigmodel.cn）查看可用模型名后修改 model。
+  base_url: https://open.bigmodel.cn/api/paas/v4
+  model: glm-4-flash
+  api_key_env: ZHIPU_API_KEY
 
 embedding:
+  # BAAI/bge-m3：硅基流动免费档，中英多语，8K 上下文
   base_url: https://api.siliconflow.cn/v1
-  # BAAI/bge-m3：硅基流动免费档，中英多语，8K 上下文；智谱备选：embedding-3
   model: BAAI/bge-m3
   api_key_env: LLM_API_KEY
 
