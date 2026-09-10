@@ -17,6 +17,9 @@ from paper_agent.config import PROJECT_ROOT, EndpointConfig, load_config, resolv
 from paper_agent.download import DownloadError, download_pdf, safe_dirname
 from paper_agent.graph.hello import run_hello
 from paper_agent.library import Library, PaperRecord
+from paper_agent.extraction.experiment_flow import extract_experiment
+from paper_agent.extraction.report import generate_report
+from paper_agent.llm import chat
 from paper_agent.models import normalize_title
 from paper_agent.parsing import SUPPORTED_SUFFIXES, extract_markdown
 from paper_agent.sources import SourceUnavailable
@@ -243,6 +246,90 @@ def parse(
 
 
 @app.command()
+def analyze(
+    ids: list[str] = typer.Argument(None, help="论文 id 片段；缺省配合 --all"),
+    all: bool = typer.Option(False, "--all", help="分析所有 parsed 状态论文"),
+) -> None:
+    """LLM 知识提取：生成 experiment.json + report.md（状态 analyzed）。
+
+    需要 LLM API Key（.env）。仅 downloaded 未解析的论文会自动先解析。
+    """
+    cfg = load_config()
+    lib = _library(cfg)
+    try:
+        if ids:
+            targets = _resolve(lib, ids)
+        elif all:
+            targets = lib.list(status="parsed")
+        else:
+            targets = []
+        if not targets:
+            console.print("没有待分析的论文（parsed 状态）。")
+            return
+        ok = fail = 0
+        total_tokens = 0
+        for rec in targets:
+            sid, p = rec.paper.source_id, rec.paper
+            parsed_path = _parsed_dir(cfg) / safe_dirname(sid) / "full_text.md"
+            if not parsed_path.exists():
+                console.print(f"{WARN} [dim]{sid}[/dim] 未解析，自动补跑 parse…")
+                if rec.status != "downloaded" or not rec.pdf_path:
+                    console.print(f"{FAIL} [dim]{sid}[/dim] 无法解析（无原文），跳过")
+                    fail += 1
+                    continue
+                try:
+                    md = extract_markdown(rec.pdf_path)
+                    parsed_path.parent.mkdir(parents=True, exist_ok=True)
+                    parsed_path.write_text(md, encoding="utf-8")
+                    lib.set_status(sid, "parsed")
+                except Exception as exc:
+                    console.print(f"{FAIL} [dim]{sid}[/dim] 自动解析失败：{exc}")
+                    fail += 1
+                    continue
+            try:
+                markdown = parsed_path.read_text(encoding="utf-8")
+                console.print(f"⏳ [dim]{sid}[/dim] {p.title[:36]}… 提取实验知识…")
+                experiment = extract_experiment(markdown, chat_fn=chat)
+                console.print(f"⏳ [dim]{sid}[/dim] {p.title[:36]}… 生成精读报告…")
+                report, report_usage = generate_report(markdown, chat_fn=chat)
+                tokens = (
+                    experiment["token_usage"]["prompt"] + experiment["token_usage"]["completion"]
+                    + report_usage["prompt"] + report_usage["completion"]
+                )
+                total_tokens += tokens
+            except RuntimeError as exc:  # 缺 Key 等配置问题，直接中断
+                console.print(f"{FAIL} {exc}")
+                raise typer.Exit(code=1) from exc
+            except Exception as exc:
+                lib.set_status(sid, "parsed", error=f"分析失败：{exc}"[:500])
+                console.print(f"{FAIL} [dim]{sid}[/dim] {p.title[:36]}…：{str(exc)[:160]}")
+                fail += 1
+                continue
+            out_dir = _knowledge_dir(cfg) / safe_dirname(sid)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            import json as _json
+
+            (out_dir / "experiment.json").write_text(
+                _json.dumps(experiment, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            (out_dir / "report.md").write_text(report, encoding="utf-8")
+            lib.set_status(sid, "analyzed", error=None)
+            low_conf = sum(1 for v in experiment["confidence"].values() if v == "low")
+            console.print(
+                f"{OK} [dim]{sid}[/dim] {p.title[:36]}…（~{tokens} tokens"
+                + (f"，{low_conf} 个低置信字段" if low_conf else "")
+                + "）"
+            )
+            ok += 1
+        console.print(
+            f"\n分析完成：{ok} 成功，{fail} 失败，共用约 {total_tokens} tokens"
+            f"（产物在 data/knowledge/ 下）"
+        )
+    finally:
+        lib.close()
+
+
+@app.command()
 def status(
     show: int = typer.Option(20, "--show", min=0, help="列表展示条数，0 只看统计"),
 ) -> None:
@@ -440,6 +527,10 @@ def _papers_dir(cfg: dict) -> Path:
 
 def _parsed_dir(cfg: dict) -> Path:
     return _data_dir(cfg) / "parsed"
+
+
+def _knowledge_dir(cfg: dict) -> Path:
+    return _data_dir(cfg) / "knowledge"
 
 
 def _library(cfg: dict) -> Library:
