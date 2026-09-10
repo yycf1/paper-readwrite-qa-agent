@@ -1,0 +1,15 @@
+# 运行时数据与密钥
+data/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# uv（uv.lock 建议提交，此处忽略本地缓存）
+uv-cache/
