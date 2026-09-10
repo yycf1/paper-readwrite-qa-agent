@@ -188,6 +188,24 @@ def test_analyze_skipped_without_llm_key(fake_io, monkeypatch, tmp_path):
     assert state["stats"]["parsed"] == 1
 
 
+def test_download_backfills_budget_from_remaining_discovered(fake_io, tmp_path):
+    """选中论文全是仅摘要时，预算结余应回填给其余有 OA 链接的 discovered 论文。"""
+    cfg, _papers, store_state = fake_io
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        # 检索会带入 W1(100引)/W3(50引)/W4(30引)；W9 引用最高必被选中，但无 OA 链接
+        lib.upsert_paper(_paper("openalex:W9", "Only Abstract Selected", citations=999, year=2023))
+        params = {"max_per_source": 1, "top_n": 1, "year_from": 2020, "download_budget": 1}
+        state = _invoke("topic", params)
+        assert state["stats"]["abstract_only"] == 1  # 选中项无 OA
+        assert state["stats"]["downloaded"] == 1  # 结余回填 1 篇
+        # 回填取剩余中引用最高的 W1，并被流水线一路处理到 indexed
+        assert lib.get("openalex:W1").status == "indexed"
+        assert any("回填" in n for n in state["notes"])
+    finally:
+        lib.close()
+
+
 def test_select_papers_orders_by_citations(tmp_path):
     lib = Library(tmp_path / "lib.db")
     try:

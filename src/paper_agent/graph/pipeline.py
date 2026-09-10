@@ -109,11 +109,35 @@ def select_papers(lib: Library, params: dict) -> list[str]:
 
 
 def run_download(lib: Library, cfg: dict, params: dict, *, selected: list[str]) -> tuple[dict, list[str]]:
-    """下载 selected 中 discovered 且有 OA 链接的论文（受预算限制）。"""
+    """下载 selected 中 discovered 且有 OA 链接的论文（受预算限制）。
+
+    预算结余回填：selected 全是「仅摘要」时预算会白白浪费——按引用数从
+    库内其余 discovered 且有 OA 链接的论文继续下载，直到预算用完。
+    """
     proxy = cfg.get("proxy", "") or ""
     notes: list[str] = []
     counts = {"downloaded": 0, "download_failed": 0, "abstract_only": 0}
     budget = params.get("download_budget") or 0
+
+    def _try(rec) -> bool:
+        """下载一篇；返回是否消耗了预算（无 OA 链接不消耗）。"""
+        nonlocal budget
+        if not rec.paper.pdf_urls:
+            return False
+        if budget <= 0:
+            return False
+        budget -= 1
+        try:
+            path = download_pdf(rec.paper, paths.papers_dir(cfg), proxy=proxy)
+        except DownloadError as exc:
+            lib.set_status(rec.paper.source_id, "download_failed", error=str(exc)[:500])
+            counts["download_failed"] += 1
+            return True
+        lib.set_status(rec.paper.source_id, "downloaded", error=None, pdf_path=str(path))
+        counts["downloaded"] += 1
+        return True
+
+    budget_exhausted = False
     for sid in selected:
         rec = lib.get(sid)
         if rec is None or rec.status != "discovered":
@@ -121,18 +145,23 @@ def run_download(lib: Library, cfg: dict, params: dict, *, selected: list[str]) 
         if not rec.paper.pdf_urls:
             counts["abstract_only"] += 1
             continue
-        if budget <= 0:
-            notes.append(f"下载预算耗尽，剩余论文未尝试（可调大 pipeline.download_budget）")
+        if not _try(rec):
+            budget_exhausted = True
             break
-        budget -= 1
-        try:
-            path = download_pdf(rec.paper, paths.papers_dir(cfg), proxy=proxy)
-        except DownloadError as exc:
-            lib.set_status(sid, "download_failed", error=str(exc)[:500])
-            counts["download_failed"] += 1
-            continue
-        lib.set_status(sid, "downloaded", error=None, pdf_path=str(path))
-        counts["downloaded"] += 1
+    # 结余回填：其余 discovered 且有 OA 链接的，按引用数继续
+    if budget > 0:
+        remaining = [r for r in lib.list(status="discovered") if r.paper.pdf_urls and r.paper.source_id not in selected]
+        remaining.sort(key=lambda r: (r.paper.citations or 0, r.paper.year or 0), reverse=True)
+        filled = 0
+        for rec in remaining:
+            if budget <= 0:
+                break
+            if _try(rec):
+                filled += 1
+        if filled:
+            notes.append(f"选中论文多为仅摘要，预算结余回填下载了 {filled} 篇其余高引论文")
+    if budget_exhausted:
+        notes.append("下载预算耗尽，剩余论文未尝试（可调大 pipeline.download_budget）")
     return counts, notes
 
 

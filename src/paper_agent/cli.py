@@ -12,7 +12,7 @@ from openai import OpenAI
 from rich.console import Console
 from rich.table import Table
 
-from paper_agent import __version__
+from paper_agent import __version__, paths
 from paper_agent.config import PROJECT_ROOT, EndpointConfig, load_config, resolve_endpoint
 from paper_agent.download import DownloadError, download_pdf, safe_dirname
 from paper_agent.graph.hello import run_hello
@@ -443,6 +443,9 @@ def ask(
             q = console.input("[bold cyan]问题> [/bold cyan]").strip()
         except (EOFError, KeyboardInterrupt):
             break
+        except UnicodeDecodeError:
+            console.print(f"{WARN} 输入编码无法解码，请重试")
+            continue
         if not q or q.lower() in ("q", "quit", "exit"):
             break
         answer = _answer_once(q, retriever, k=k, paper_id=paper_id, history=history)
@@ -617,6 +620,9 @@ def chat() -> None:
                 text = console.input("[bold cyan]pa> [/bold cyan]").strip()
             except (EOFError, KeyboardInterrupt):
                 break
+            except UnicodeDecodeError:
+                console.print(f"{WARN} 输入编码无法解码，请重试")
+                continue
             if not text or text.lower() in ("q", "quit", "exit"):
                 break
             route = classify_intent(text)
@@ -857,23 +863,23 @@ def _check_endpoint(table: Table, label: str, ep: EndpointConfig, *, is_embeddin
 
 
 def _data_dir(cfg: dict) -> Path:
-    return PROJECT_ROOT / cfg.get("data_dir", "data")
+    return paths.data_dir(cfg)
 
 
 def _papers_dir(cfg: dict) -> Path:
-    return _data_dir(cfg) / "papers"
+    return paths.papers_dir(cfg)
 
 
 def _parsed_dir(cfg: dict) -> Path:
-    return _data_dir(cfg) / "parsed"
+    return paths.parsed_dir(cfg)
 
 
 def _knowledge_dir(cfg: dict) -> Path:
-    return _data_dir(cfg) / "knowledge"
+    return paths.knowledge_dir(cfg)
 
 
 def _library(cfg: dict) -> Library:
-    return Library(_data_dir(cfg) / "library.db")
+    return paths.library(cfg)
 
 
 def _title_from_document(path: Path, *, fallback: str) -> str:
