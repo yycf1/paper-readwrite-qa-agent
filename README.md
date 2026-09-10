@@ -9,7 +9,7 @@
 | M0 初始化与环境验证 | ✅ 完成（2026-09-11：硅基流动实测连通，BGE-M3 + DeepSeek-V3，`pa doctor` 全绿） |
 | M1 检索下载 + 文献库账本 | ✅ 完成（2026-09-11：OpenAlex/EuropePMC 实测通过，arXiv 待 proxy） |
 | M2 解析 + 本地导入 + 知识提取 | ✅ 完成（2026-09-11：PDF/DOCX 解析、experiment.json + report.md 端到端实测通过） |
-| M3 RAG 问答 + 评测集 | ⬜ |
+| M3 RAG 问答 + 评测集 | ✅ 完成（2026-09-11：索引 22 篇 142 块，`pa eval` 检索命中率 100%；答案生成实测待 .env 补 `ZHIPU_API_KEY`） |
 | M4 编排整合 | ⬜ |
 
 ## 快速开始
@@ -35,16 +35,20 @@ python -m uv run pa download --all          # 下载所有待处理论文的 OA 
 python -m uv run pa add "路径\论文.pdf"      # 导入本地 PDF/DOCX（中文文献入口）
 python -m uv run pa parse --all             # 解析为分节 Markdown
 python -m uv run pa analyze --all           # LLM 提取 experiment.json + 精读报告
+python -m uv run pa index --all             # 分块 + 向量化 + Chroma 索引（增量）
+python -m uv run pa ask "论文里用了哪些数据集？"   # 问答（带出处；无参进入多轮 REPL）
+python -m uv run pa eval                    # RAG 回归评测（--with-llm 加测答案质量）
 python -m uv run pa status                  # 文献库状态总览
 python -m uv run pa doctor                  # 环境自检（平台 + 数据源）
 ```
 
 - 论文 id 可用片段（如 `W3217045679`、`PMC13451302`），多源结果自动去重；
-- 无 OA 全文的论文标记「仅摘要」，M3 起摘要也入知识库；
-- `pa analyze` 需要 LLM Key，产物在 `data/knowledge/{id}/`（experiment.json + report.md）；
+- 无 OA 全文的论文标记「仅摘要」，其摘要也会以单块入知识库；
+- `pa ask --paper <id片段>` 可限定单篇问答；范围外问题会明确回答「未提及」；
+- `pa analyze`/`pa ask` 需要 LLM Key，产物在 `data/knowledge/{id}/`；
 - arXiv 在本机被网络屏蔽，检索自动降级；如需 arXiv，开启代理工具并在 `config.yaml` 的 `proxy` 填 `http://127.0.0.1:端口`。
 
 ## 配置说明
 
 - `config.yaml`：平台 base_url / model、无人值守参数（top_n、年份过滤、下载预算）。切换硅基流动 ↔ 智谱只改此文件。
-- `.env`：存放 API Key（变量名由 config.yaml 的 `api_key_env` 指定，默认 `LLM_API_KEY`）。
+- `.env`：存放 API Key（变量名由各端点的 `api_key_env` 指定）。当前 `llm` 用智谱免费档（`ZHIPU_API_KEY`），`embedding` 用硅基流动 BGE-M3（`LLM_API_KEY`）。
