@@ -20,7 +20,7 @@
 
 ### 2.1 一期做
 
-- arXiv / Semantic Scholar / PubMed 三源检索与合并去重；
+- OpenAlex / Europe PMC / arXiv 三源检索与合并去重（来源选型依据见 §3，按本机网络实测调整）；
 - 开放获取全文 PDF 自动下载；本地文件导入（PDF / DOCX，含中文论文路径）；
 - PDF / DOCX → 分节 Markdown 解析；
 - LLM 结构化实验知识提取（experiment.json，含复现资产链接与置信度标注）；
@@ -45,7 +45,7 @@
 
 | 决策项 | 结论 |
 |---|---|
-| 文献来源 | arXiv + Semantic Scholar + PubMed；PubMed 全文仅 PMC 开放获取子集，其余降级为「仅摘要入知识库」并明确告知用户 |
+| 文献来源 | **OpenAlex（主力索引）+ Europe PMC（生物医学）+ arXiv（适配器保留）**。2026-09-11 本机实测：Semantic Scholar API 可达但匿名池 429 拥挤，PubMed eutils 与 arXiv 连接被重置（网络屏蔽）；OpenAlex 与 Europe PMC 直连可用且均免 Key。S2 降为可选 fallback（申请 Key 或低峰使用 + 缓存）；arXiv 走可选代理，不可达时降级跳过并标注 |
 | LLM / Embedding 平台 | 主：硅基流动（BAAI/bge-m3 embedding 长期免费、中英多语、8K 上下文；LLM 聚合 DeepSeek/Qwen/GLM，按量便宜）；备：智谱（glm-4-flash 免费档 + embedding-3）。两家均 OpenAI 兼容，`base_url + api_key + model` 配置化切换，不锁定任何一家 |
 | 免费额度风险处理 | M0 第一个任务即实测定稿配置；OpenAI 兼容抽象保证换平台只改配置 |
 | 交互形态 | CLI（Typer + rich），问答为交互 REPL |
@@ -177,11 +177,12 @@ E:\文献阅读复现agent\
 - **验收**：一条命令输出「平台连通 + 图执行成功」。
 
 ### M1 · 检索下载 + 文献库账本（2.5～3 天）
-1. 三源 client：arXiv（限速 1 req/3s 写死）、Semantic Scholar（申请免费 API Key + 请求缓存）、PubMed（esearch/esummary，全文走 PMC OA 子集）；
+1. 三源 client：OpenAlex（主力检索：关键词 + DOI/引用数/OA 链接，mailto 礼貌池 + 请求缓存）、Europe PMC（生物医学检索 + OA 全文 XML 下载）、arXiv（搜索 + PDF，限速 1 req/3s 写死，走可选代理；不可达时降级跳过）；
 2. 统一 Paper 模型与 `source_id` 全局键；**模糊标题去重**（归一化大小写标点，因 DOI 覆盖不全）；
 3. **library.db 账本**：五态生命周期，所有命令围绕账本决定「跳过还是执行」；
-4. CLI：`search`、`download`、`status`。
-- **验收**：主题词返回三源合并去重的候选列表，下载 PDF 落盘，失败条目有状态标记；重复执行不重复下载。
+4. CLI：`search`、`download`、`status`；
+5. `config.yaml` 增加全局 proxy 配置（供 arXiv 等被屏蔽源使用）；`pa doctor` 增加数据源连通性检查（网络屏蔽可自诊断）。
+- **验收**：主题词返回多源合并去重的候选列表，下载 PDF 落盘，失败条目有状态标记；重复执行不重复下载。
 
 ### M2 · 解析 + 本地导入 + 知识提取（3.5～4 天）
 1. `pa add` 本地导入（PDF/DOCX 注册入库，接同一后续流程）；
@@ -211,7 +212,7 @@ E:\文献阅读复现agent\
 |---|---|
 | PDF 解析质量（双栏/公式/表格）——最大不确定性 | PyMuPDF 跑基线，不够再引入 MinerU（学术 PDF 专用开源解析器，依赖较重）；解析结果缓存，换解析器无需重下论文 |
 | PubMed 全文墙 | 摘要永远可用；全文仅 PMC OA 子集；其余降级为「仅摘要入知识库」，状态透明告知 |
-| Semantic Scholar 限流 | 免费 API Key + 本地请求缓存 |
+| 本机网络屏蔽（实测 arXiv / PubMed 不通、S2 匿名池拥挤） | 主力改用 OpenAlex + Europe PMC（免 Key 直连可用）；arXiv 走可选代理，不可达时降级；doctor 内置数据源连通检查 |
 | embedding 免费额度变动 | OpenAI 兼容抽象层，换平台只改配置 |
 | RAG 质量无感知劣化 | M3 评测集 + `pa eval` 回归 |
 | LLM 编造实验步骤 | 逐字段置信度 + unverified_claims 标注机制，展示时提示 |
