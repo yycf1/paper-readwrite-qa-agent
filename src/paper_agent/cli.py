@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import typer
 from openai import OpenAI
@@ -10,8 +11,15 @@ from rich.console import Console
 from rich.table import Table
 
 from paper_agent import __version__
-from paper_agent.config import EndpointConfig, load_config, resolve_endpoint
+from paper_agent.config import PROJECT_ROOT, EndpointConfig, load_config, resolve_endpoint
+from paper_agent.download import DownloadError, download_pdf
 from paper_agent.graph.hello import run_hello
+from paper_agent.library import Library, PaperRecord
+from paper_agent.models import normalize_title
+from paper_agent.sources import SourceUnavailable
+from paper_agent.sources import arxiv as arxiv_src
+from paper_agent.sources import europepmc as epmc_src
+from paper_agent.sources import openalex as oa_src
 
 app = typer.Typer(
     help="paper-agent：文献阅读复现 Agent（检索→下载→解析→实验知识提取→RAG问答）",
@@ -22,6 +30,9 @@ console = Console()
 OK = "[green]✅[/green]"
 FAIL = "[red]❌[/red]"
 SKIP = "[yellow]⏭ 未检查[/yellow]"
+WARN = "[yellow]⚠[/yellow]"
+
+SOURCE_MODULES = {"openalex": oa_src, "europepmc": epmc_src, "arxiv": arxiv_src}
 
 
 @app.command()
@@ -30,16 +41,209 @@ def version() -> None:
     console.print(f"paper-agent {__version__}")
 
 
+# ---------------------------------------------------------------------------
+# M1：检索 / 下载 / 库状态
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def search(
+    query: str = typer.Argument(..., help="检索关键词（支持中英文）"),
+    source: str = typer.Option(
+        "openalex,europepmc,arxiv", "--source", "-s", help="逗号分隔的数据源"
+    ),
+    max: int = typer.Option(10, "--max", "-m", min=1, help="每源返回条数上限"),
+    year_from: int | None = typer.Option(None, "--year-from", help="只保留该年份及以后"),
+) -> None:
+    """检索论文并入库（状态 discovered），表格展示候选；跨源自动去重。"""
+    cfg = load_config()
+    proxy = cfg.get("proxy", "") or ""
+    source_cfg = cfg.get("sources", {}) or {}
+    names = [s.strip().lower() for s in source.split(",") if s.strip()]
+    unknown = [n for n in names if n not in SOURCE_MODULES]
+    if unknown:
+        console.print(f"{FAIL} 未知数据源：{', '.join(unknown)}（可用：{', '.join(SOURCE_MODULES)}）")
+        raise typer.Exit(code=1)
+
+    lib = _library(cfg)
+    try:
+        seen: dict[str, str] = {}  # 去重键（doi 或 归一化标题）→ source_id
+        merged: list[PaperRecord] = []
+        for name in names:
+            if not (source_cfg.get(name) or {}).get("enabled", True):
+                console.print(f"{SKIP} {name}：已在 config.yaml 停用")
+                continue
+            module = SOURCE_MODULES[name]
+            try:
+                if name == "openalex":
+                    email = (source_cfg.get("openalex") or {}).get("email", "") or ""
+                    papers = module.search(query, max, year_from, proxy=proxy, email=email)
+                else:
+                    papers = module.search(query, max, year_from, proxy=proxy)
+            except SourceUnavailable as exc:
+                hint = "可在 config.yaml 配置 proxy" if name == "arxiv" else "请检查网络"
+                console.print(f"{WARN} {name} 不可用（{exc}），已跳过——{hint}")
+                continue
+            added = 0
+            for p in papers:
+                dup_id = _duplicate_of(lib, seen, p)
+                if dup_id:
+                    existing = lib.get(dup_id)
+                    if existing:
+                        lib.upsert_paper(p)  # 合并补充元数据（状态不变）
+                    continue
+                lib.upsert_paper(p)
+                rec = lib.get(p.source_id)
+                if rec:
+                    merged.append(rec)
+                    added += 1
+                if p.doi:
+                    seen[f"doi:{p.doi}"] = p.source_id
+                seen[f"t:{normalize_title(p.title)}"] = p.source_id
+            console.print(f"[cyan]{name}[/cyan]：{len(papers)} 条结果")
+        _print_papers(merged, title=f"检索「{query}」：{len(merged)} 篇新入库")
+        if merged:
+            console.print(
+                "\n下一步：[cyan]pa download <id...>[/cyan] 下载 PDF，"
+                "或 [cyan]pa download --all[/cyan]"
+            )
+    finally:
+        lib.close()
+
+
+@app.command()
+def download(
+    ids: list[str] = typer.Argument(None, help="论文 id（可用 source_id 片段，如 W274... 或 2401.12345）"),
+    all: bool = typer.Option(False, "--all", help="下载所有 discovered 状态的论文"),
+    limit: int = typer.Option(10, "--limit", "-l", min=1, help="--all 模式的下载上限"),
+) -> None:
+    """下载论文 PDF（开放获取）；失败标记 download_failed，不中断其余下载。"""
+    cfg = load_config()
+    proxy = cfg.get("proxy", "") or ""
+    lib = _library(cfg)
+    try:
+        if all:
+            targets = [r for r in lib.list(status="discovered") if r.paper.pdf_urls]
+            skipped_no_pdf = sum(1 for r in lib.list(status="discovered") if not r.paper.pdf_urls)
+            targets = targets[:limit]
+            if skipped_no_pdf:
+                console.print(f"{SKIP} {skipped_no_pdf} 篇无 OA 全文（仅摘要），自动跳过")
+        else:
+            targets = _resolve(lib, ids or [])
+        if not targets:
+            console.print("没有待下载的论文。先用 [cyan]pa search[/cyan] 检索入库。")
+            return
+
+        ok = fail = 0
+        for rec in targets:
+            p = rec.paper
+            try:
+                path = download_pdf(p, _papers_dir(cfg), proxy=proxy)
+                lib.set_status(p.source_id, "downloaded", error=None, pdf_path=str(path))
+                size_kb = path.stat().st_size / 1024
+                console.print(f"{OK} [dim]{p.source_id}[/dim] {p.title[:40]}…（{size_kb:.0f} KB）")
+                ok += 1
+            except DownloadError as exc:
+                lib.set_status(p.source_id, "download_failed", error=str(exc)[:500])
+                console.print(f"{FAIL} [dim]{p.source_id}[/dim] {p.title[:40]}…：{str(exc)[:120]}")
+                fail += 1
+        console.print(f"\n下载完成：{ok} 成功，{fail} 失败（失败项可用同样命令重试）")
+    finally:
+        lib.close()
+
+
+@app.command()
+def status(
+    show: int = typer.Option(20, "--show", min=0, help="列表展示条数，0 只看统计"),
+) -> None:
+    """文献库总览：状态统计与论文列表。"""
+    cfg = load_config()
+    lib = _library(cfg)
+    try:
+        counts = lib.counts()
+        total = sum(counts.values())
+        stat_line = "  ".join(f"{s}: [bold]{n}[/bold]" for s, n in sorted(counts.items()))
+        console.print(f"文献库（{lib.db_path}）：共 {total} 篇\n{stat_line}")
+        if show:
+            _print_papers(lib.list()[:show], title=f"最近 {min(show, total)} 篇")
+    finally:
+        lib.close()
+
+
+def _duplicate_of(lib: Library, seen: dict[str, str], p) -> str | None:
+    """先用本次会话的内存索引去重，再查账本（跨命令重复检索也不重复入库）。"""
+    if p.doi and seen.get(f"doi:{p.doi}"):
+        return seen[f"doi:{p.doi}"]
+    tkey = f"t:{normalize_title(p.title)}"
+    if seen.get(tkey):
+        return seen[tkey]
+    return lib.find_duplicate(p)
+
+
+def _print_papers(records: list[PaperRecord], *, title: str) -> None:
+    table = Table(title=title, show_header=True, header_style="bold")
+    table.add_column("id", style="cyan", no_wrap=True)
+    table.add_column("源", no_wrap=True)
+    table.add_column("年份", justify="right")
+    table.add_column("引用", justify="right")
+    table.add_column("PDF", justify="center")
+    table.add_column("状态", no_wrap=True)
+    table.add_column("标题", overflow="fold", max_width=52)
+    for rec in records:
+        p = rec.paper
+        pdf_mark = "[green]✓[/green]" if p.pdf_urls else "[yellow]仅摘要[/yellow]"
+        status_mark = rec.status
+        if rec.status == "download_failed":
+            status_mark = f"[red]{rec.status}[/red]"
+        table.add_row(
+            p.source_id.split(":", 1)[1],
+            p.source,
+            str(p.year or "-"),
+            str(p.citations if p.citations is not None else "-"),
+            pdf_mark,
+            status_mark,
+            p.title,
+        )
+    console.print(table)
+
+
+def _resolve(lib: Library, ids: list[str]) -> list[PaperRecord]:
+    """把用户输入的 id 片段解析为账本记录；歧义/未找到给出提示。"""
+    records: list[PaperRecord] = []
+    for fragment in ids:
+        fragment = fragment.strip()
+        if not fragment:
+            continue
+        matches = lib.find(fragment)
+        exact = [m for m in matches if m == fragment]
+        if exact:
+            matches = exact
+        if not matches:
+            console.print(f"{WARN} 未找到「{fragment}」，跳过（用 pa status 查看 id）")
+            continue
+        if len(matches) > 1:
+            console.print(f"{WARN} 「{fragment}」匹配多条（{', '.join(matches)}），请用更完整的 id")
+            continue
+        rec = lib.get(matches[0])
+        if rec:
+            records.append(rec)
+    return records
+
+
+# ---------------------------------------------------------------------------
+# 环境自检（M0/M1）
+# ---------------------------------------------------------------------------
+
+
 @app.command()
 def doctor() -> None:
-    """M0 验收自检：配置 → API Key → 平台连通（embedding + LLM）→ LangGraph 图执行。"""
+    """环境自检：配置 → API Key → 平台连通 → 数据源连通 → LangGraph 图执行。"""
     console.print("[bold]paper-agent 环境自检[/bold]\n")
     table = Table(show_header=True, header_style="bold")
     table.add_column("检查项", style="cyan")
     table.add_column("状态")
     table.add_column("详情", overflow="fold")
 
-    # 1. 配置文件
     try:
         cfg = load_config()
         table.add_row("配置文件 config.yaml", OK, "加载成功")
@@ -48,11 +252,10 @@ def doctor() -> None:
         console.print(table)
         raise typer.Exit(code=1) from exc
 
-    # 2/3. embedding 与 LLM 连通性（无 Key 时跳过并给出指引）
     platform_ok = _check_endpoint(table, "Embedding 平台", resolve_endpoint(cfg["embedding"]), is_embedding=True)
     platform_ok &= _check_endpoint(table, "LLM 平台", resolve_endpoint(cfg["llm"]), is_embedding=False)
+    sources_ok = _check_sources(table, cfg)
 
-    # 4. LangGraph hello world（不依赖外部服务）
     try:
         result = run_hello()
         table.add_row("LangGraph 图执行", OK, result["message"])
@@ -62,9 +265,15 @@ def doctor() -> None:
         graph_ok = False
 
     console.print(table)
-    if platform_ok and graph_ok:
-        console.print("\n[bold green]结论：平台连通 + 图执行成功，M0 验收通过。[/bold green]")
-    elif graph_ok:
+    core_ok = platform_ok and graph_ok
+    if core_ok and sources_ok:
+        console.print("\n[bold green]结论：全部检查通过。[/bold green]")
+    elif core_ok:
+        console.print(
+            "\n[bold yellow]LLM/图执行正常，但部分数据源不可达[/bold yellow]："
+            "检索会自动降级到可用源；如需 arXiv，请在 config.yaml 配置 proxy。"
+        )
+    else:
         console.print(
             "\n[bold yellow]图执行正常，但平台尚未连通，还差 API Key：[/bold yellow]\n"
             "1) 复制 .env.example 为 .env；\n"
@@ -72,9 +281,30 @@ def doctor() -> None:
             "3) 重新运行 [cyan]pa doctor[/cyan]。"
         )
         raise typer.Exit(code=1)
-    else:
-        console.print("\n[bold red]图执行失败，请把上方错误信息反馈给开发流程排查。[/bold red]")
-        raise typer.Exit(code=1)
+
+
+def _check_sources(table: Table, cfg: dict) -> bool:
+    """逐源连通探测；返回是否全部可用。"""
+    proxy = cfg.get("proxy", "") or ""
+    source_cfg = cfg.get("sources", {}) or {}
+    all_ok = True
+    for name, module in SOURCE_MODULES.items():
+        label = f"数据源 · {name}"
+        if not (source_cfg.get(name) or {}).get("enabled", True):
+            table.add_row(label, SKIP, "已在 config.yaml 停用")
+            continue
+        try:
+            if name == "openalex":
+                email = (source_cfg.get("openalex") or {}).get("email", "") or ""
+                detail = module.probe(proxy=proxy, email=email)
+            else:
+                detail = module.probe(proxy=proxy)
+            table.add_row(label, OK, detail)
+        except SourceUnavailable as exc:
+            hint = "可在 config.yaml 配置 proxy" if name == "arxiv" else "检查网络后重试"
+            table.add_row(label, FAIL, f"{exc}——{hint}")
+            all_ok = False
+    return all_ok
 
 
 def _check_endpoint(table: Table, label: str, ep: EndpointConfig, *, is_embedding: bool) -> bool:
@@ -103,6 +333,23 @@ def _check_endpoint(table: Table, label: str, ep: EndpointConfig, *, is_embeddin
         cost = time.perf_counter() - start
         table.add_row(label, FAIL, f"{ep.model} @ {ep.base_url}（耗时 {cost:.1f}s）：{exc}")
         return False
+
+
+# ---------------------------------------------------------------------------
+# 内部工具
+# ---------------------------------------------------------------------------
+
+
+def _data_dir(cfg: dict) -> Path:
+    return PROJECT_ROOT / cfg.get("data_dir", "data")
+
+
+def _papers_dir(cfg: dict) -> Path:
+    return _data_dir(cfg) / "papers"
+
+
+def _library(cfg: dict) -> Library:
+    return Library(_data_dir(cfg) / "library.db")
 
 
 if __name__ == "__main__":

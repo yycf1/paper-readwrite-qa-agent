@@ -1,5 +1,5 @@
-# paper-agent 配置（M0 基线：主用硅基流动，备选智谱）
-# 切换平台：改 base_url 和 model；API Key 一律放 .env，不写进本文件。
+# paper-agent 配置
+# 切换 LLM 平台：改 base_url 和 model；API Key 一律放 .env，不写进本文件。
 
 llm:
   base_url: https://api.siliconflow.cn/v1
@@ -13,7 +13,20 @@ embedding:
   model: BAAI/bge-m3
   api_key_env: LLM_API_KEY
 
-# 无人值守与下载预算（M1+ 使用）
+# 网络：访问被屏蔽的数据源（如 arXiv）时填本地代理，例如 http://127.0.0.1:7890；留空直连
+proxy: ""
+
+# 文献数据源（M1）：源不可达时自动降级跳过，不中断流水线
+sources:
+  openalex:
+    enabled: true
+    email: ""            # 选填：填邮箱进入 OpenAlex 礼貌池，限额更宽
+  europepmc:
+    enabled: true
+  arxiv:
+    enabled: true        # 无代理且被屏蔽时，搜索自动降级并在结果中标注
+
+# 无人值守与下载预算（M4 使用）
 pipeline:
   top_n: 5
   year_from: 2020
