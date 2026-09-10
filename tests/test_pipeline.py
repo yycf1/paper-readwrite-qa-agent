@@ -1,0 +1,200 @@
+"""流水线（graph/pipeline.py）测试：monkeypatch IO，走真实图，全离线。"""
+
+from __future__ import annotations
+
+import pytest
+
+from paper_agent.graph import pipeline as pl
+from paper_agent.library import Library
+from paper_agent.models import Paper
+
+
+def _paper(sid: str, title: str, *, citations=None, year=None, pdf_urls=(), doi=None):
+    return Paper(
+        source=sid.split(":", 1)[0],
+        source_id=sid,
+        title=title,
+        citations=citations,
+        year=year,
+        pdf_urls=list(pdf_urls),
+        doi=doi,
+    )
+
+
+def _cfg(tmp_path):
+    return {
+        "data_dir": str(tmp_path / "data"),
+        "proxy": "",
+        "sources": {"openalex": {"enabled": True}, "europepmc": {"enabled": True}, "arxiv": {"enabled": False}},
+        "pipeline": {"top_n": 2, "year_from": 2020, "download_budget": 1},
+    }
+
+
+def _make_fake_store(state):
+    """带跨阶段持久化的 fake 向量库：模拟 Chroma 的已有内容查询。"""
+
+    class _FakeStore:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def paper_modes(self):
+            return dict(state["modes"])
+
+        def upsert_paper_chunks(self, paper_id, texts, metas, embeddings):
+            self.remove_paper(paper_id)
+            if texts:
+                state["chunks"][paper_id] = list(texts)
+                state["modes"][paper_id] = metas[0].get("mode", "")
+            return len(texts)
+
+        def remove_paper(self, paper_id):
+            state["chunks"].pop(paper_id, None)
+            state["modes"].pop(paper_id, None)
+
+    return _FakeStore
+
+
+@pytest.fixture()
+def fake_io(monkeypatch, tmp_path):
+    """统一替换源检索 / 下载 / 解析 / LLM / 向量库 / 配置。"""
+    cfg = _cfg(tmp_path)
+    store_state = {"modes": {}, "chunks": {}}
+    papers = {
+        "oa": [
+            _paper("openalex:W1", "Paper One", citations=100, year=2022, pdf_urls=["http://x/1.pdf"], doi="10.1/1"),
+            _paper("openalex:W2", "Paper Two", citations=5, year=2019, pdf_urls=["http://x/2.pdf"]),  # 年份被过滤
+            _paper("openalex:W3", "Paper Three", citations=50, year=2023, pdf_urls=["http://x/3.pdf"]),
+            _paper("openalex:W4", "Abstract Only", citations=30, year=2021),
+        ],
+        "epmc": [_paper("europepmc:W1dup", "Paper One", citations=1, year=2022, doi="10.1/1")],
+    }
+
+    class _Src:
+        @staticmethod
+        def search(query, max_n, year_from, proxy="", email=""):
+            out = [p for p in papers["oa"] if year_from is None or (p.year or 0) >= year_from]
+            return out[:max_n]
+
+    class _Epmc:
+        @staticmethod
+        def search(query, max_n, year_from, proxy=""):
+            return papers["epmc"][:max_n]
+
+    monkeypatch.setattr(pl, "SOURCE_MODULES", {"openalex": _Src, "europepmc": _Epmc})
+
+    def _fake_download(paper, papers_dir, *, proxy=""):
+        dest = papers_dir / paper.source_id.replace(":", "_") / "paper.pdf"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"%PDF-fake")
+        return dest
+
+    monkeypatch.setattr(pl, "download_pdf", _fake_download)
+    monkeypatch.setattr(pl, "extract_markdown", lambda path: "段落内容。" * 60)  # ~300 token
+    monkeypatch.setattr(pl, "chat", lambda messages, **k: ("ok", {"prompt": 1, "completion": 1}))
+    monkeypatch.setattr(
+        pl, "extract_experiment",
+        lambda markdown, chat_fn=None: {"token_usage": {"prompt": 100, "completion": 50}},
+    )
+    monkeypatch.setattr(
+        pl, "generate_report",
+        lambda markdown, chat_fn=None: ("report", {"prompt": 10, "completion": 5}),
+    )
+    monkeypatch.setattr(pl, "embed", lambda texts: [[0.0] * 4 for _ in texts])
+    monkeypatch.setattr(pl, "VectorStore", _make_fake_store(store_state))
+    monkeypatch.setattr(pl, "load_config", lambda: cfg)
+    return cfg, papers, store_state
+
+
+def _invoke(query, params):
+    return pl.run_pipeline(query, params)
+
+
+def test_full_pipeline_end_to_end(fake_io, tmp_path):
+    cfg, _papers, store_state = fake_io
+    state = _invoke("test topic", {"max_per_source": 10})
+    s = state["stats"]
+    # 检索：oa 3 条（年份过滤掉 W2）+ epmc 1 条（与 W1 同 DOI 被去重）
+    assert s["searched"] == 4 and s["new"] == 3
+    # 选文 top_n=2：W1(100 引) > W3(50 引)；W4(30 引)落选
+    assert state["selected"] == ["openalex:W1", "openalex:W3"]
+    # 下载预算 1：只下载第一篇
+    assert s["downloaded"] == 1 and s["download_failed"] == 0
+    assert s["parsed"] == 1
+    assert s["analyzed"] == 1 and s["analyze_tokens"] == 165
+    assert s["indexed"] == 1 and s["index_chunks"] >= 1
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        assert lib.get("openalex:W1").status == "indexed"
+        assert lib.get("openalex:W3").status == "discovered"  # 预算耗尽，留待下轮
+        assert lib.get("openalex:W4").status == "discovered"  # 落选
+    finally:
+        lib.close()
+    assert list(store_state["chunks"]) == ["openalex:W1"]
+
+
+def test_pipeline_resume_skips_done(fake_io, tmp_path):
+    fake_io
+    _invoke("test topic", {"max_per_source": 10})
+    state2 = _invoke("test topic", {"max_per_source": 10})
+    s2 = state2["stats"]
+    # 去重：不重复入库；上轮预算耗尽未下载的 W3 本轮继续（top2 = W3, W4）
+    assert s2["new"] == 0
+    assert state2["selected"] == ["openalex:W3", "openalex:W4"]
+    assert s2["downloaded"] == 1 and s2["parsed"] == 1 and s2["analyzed"] == 1
+    # W1 已 indexed（fake 库持久化），只处理 W3
+    assert s2["indexed"] == 1
+    assert s2["downloaded"] == 1 and s2["parsed"] == 1 and s2["analyzed"] == 1
+
+
+def test_download_failure_marks_state(fake_io, monkeypatch, tmp_path):
+    cfg, _papers, _store = fake_io
+
+    def _boom(paper, papers_dir, *, proxy=""):
+        raise pl.DownloadError("HTTP 403")
+
+    monkeypatch.setattr(pl, "download_pdf", _boom)
+    params = {"max_per_source": 10, "top_n": 1, "year_from": 2020, "download_budget": 1}
+    state = _invoke("test topic", params)
+    assert state["stats"]["download_failed"] == 1
+    assert state["stats"]["parsed"] == 0  # 失败不阻塞后续阶段，但也没有可解析的
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        assert lib.get("openalex:W1").status == "download_failed"
+    finally:
+        lib.close()
+
+
+def test_parse_empty_result_guard(fake_io, monkeypatch, tmp_path):
+    fake_io
+    monkeypatch.setattr(pl, "extract_markdown", lambda path: "太短")
+    params = {"max_per_source": 10, "top_n": 1, "year_from": 2020, "download_budget": 1}
+    state = _invoke("test topic", params)
+    assert state["stats"]["parse_failed"] == 1
+    assert state["stats"]["analyzed"] == 0
+
+
+def test_analyze_skipped_without_llm_key(fake_io, monkeypatch, tmp_path):
+    fake_io
+
+    def _no_key(messages, **k):
+        raise RuntimeError("未配置 LLM API Key")
+
+    monkeypatch.setattr(pl, "chat", _no_key)
+    params = {"max_per_source": 10, "top_n": 1, "year_from": 2020, "download_budget": 1}
+    state = _invoke("test topic", params)
+    assert state["stats"]["analyzed"] == 0
+    assert any("知识提取跳过" in n for n in state["notes"])
+    # 解析/下载不受影响
+    assert state["stats"]["parsed"] == 1
+
+
+def test_select_papers_orders_by_citations(tmp_path):
+    lib = Library(tmp_path / "lib.db")
+    try:
+        for sid, cites, year in [("a:A", 10, 2021), ("a:B", 30, 2020), ("a:C", 30, 2024), ("a:D", None, 2024)]:
+            lib.upsert_paper(_paper(sid, sid, citations=cites, year=year))
+        params = {"top_n": 3, "year_from": None}
+        # 引用数优先，年份仅作并列 tiebreak；无引用按 0 计
+        assert pl.select_papers(lib, params) == ["a:C", "a:B", "a:A"]
+    finally:
+        lib.close()
