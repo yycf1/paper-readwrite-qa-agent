@@ -10,7 +10,7 @@
 | M1 检索下载 + 文献库账本 | ✅ 完成（2026-09-11：OpenAlex/EuropePMC 实测通过，arXiv 待 proxy） |
 | M2 解析 + 本地导入 + 知识提取 | ✅ 完成（2026-09-11：PDF/DOCX 解析、experiment.json + report.md 端到端实测通过） |
 | M3 RAG 问答 + 评测集 | ✅ 完成（2026-09-11：索引 22 篇 142 块，`pa eval` 检索命中率 100%；答案生成实测待 .env 补 `ZHIPU_API_KEY`） |
-| M4 编排整合 | ⬜ |
+| M4 编排整合 | ✅ 完成（2026-09-11：`pa run` 全链路 + 断点续跑实测通过；analyze→问答两环待 `ZHIPU_API_KEY` 后端到端验收） |
 
 ## 快速开始
 
@@ -36,16 +36,20 @@ python -m uv run pa add "路径\论文.pdf"      # 导入本地 PDF/DOCX（中�
 python -m uv run pa parse --all             # 解析为分节 Markdown
 python -m uv run pa analyze --all           # LLM 提取 experiment.json + 精读报告
 python -m uv run pa index --all             # 分块 + 向量化 + Chroma 索引（增量）
+python -m uv run pa run "图神经网络 推荐"    # 一键流水线：检索→选文→下载→解析→提取→索引
 python -m uv run pa ask "论文里用了哪些数据集？"   # 问答（带出处；无参进入多轮 REPL）
+python -m uv run pa chat                    # 自然语言助手（自动路由检索/问答/状态）
 python -m uv run pa eval                    # RAG 回归评测（--with-llm 加测答案质量）
 python -m uv run pa status                  # 文献库状态总览
 python -m uv run pa doctor                  # 环境自检（平台 + 数据源）
 ```
 
 - 论文 id 可用片段（如 `W3217045679`、`PMC13451302`），多源结果自动去重；
+- `pa run` 基于 library.db 状态断点续跑：中断后重跑同一主题自动跳过已完成阶段；
+- `pa run` 无人值守参数在 `config.yaml` 的 `pipeline` 节（top_n / year_from / download_budget）；
 - 无 OA 全文的论文标记「仅摘要」，其摘要也会以单块入知识库；
 - `pa ask --paper <id片段>` 可限定单篇问答；范围外问题会明确回答「未提及」；
-- `pa analyze`/`pa ask` 需要 LLM Key，产物在 `data/knowledge/{id}/`；
+- `pa analyze`/`pa ask`/`pa run` 的知识提取需要 LLM Key；
 - arXiv 在本机被网络屏蔽，检索自动降级；如需 arXiv，开启代理工具并在 `config.yaml` 的 `proxy` 填 `http://127.0.0.1:端口`。
 
 ## 配置说明
