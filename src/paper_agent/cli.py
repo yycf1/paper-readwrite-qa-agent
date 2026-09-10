@@ -22,6 +22,9 @@ from paper_agent.extraction.report import generate_report
 from paper_agent.llm import chat
 from paper_agent.models import normalize_title
 from paper_agent.parsing import SUPPORTED_SUFFIXES, extract_markdown
+from paper_agent.rag.embedder import embed
+from paper_agent.rag.splitter import chunk_abstract, split_markdown
+from paper_agent.rag.vectorstore import VectorStore
 from paper_agent.sources import SourceUnavailable
 from paper_agent.sources import arxiv as arxiv_src
 from paper_agent.sources import europepmc as epmc_src
@@ -325,6 +328,72 @@ def analyze(
             f"\n分析完成：{ok} 成功，{fail} 失败，共用约 {total_tokens} tokens"
             f"（产物在 data/knowledge/ 下）"
         )
+    finally:
+        lib.close()
+
+
+@app.command()
+def index(
+    ids: list[str] = typer.Argument(None, help="论文 id 片段；缺省索引 parsed/analyzed 状态论文"),
+    all: bool = typer.Option(False, "--all", help="索引全部可索引内容（含仅摘要论文）"),
+    force: bool = typer.Option(False, "--force", help="已在向量库的论文也重建索引"),
+) -> None:
+    """结构感知分块 → 向量化 → Chroma 增量索引（状态推进到 indexed）。
+
+    已解析全文的论文按全文分块；无全文但有摘要的论文把摘要作为单块入库
+    （不改变生命周期状态，后续下载成功可再升级为全文索引）。
+    """
+    cfg = load_config()
+    lib = _library(cfg)
+    try:
+        if ids:
+            targets = _resolve(lib, ids)
+        elif all:
+            targets = lib.list()
+        else:
+            targets = lib.list(status="parsed") + lib.list(status="analyzed")
+        if not targets:
+            console.print("没有可索引的论文（需先 parse，或论文带摘要）。")
+            return
+        store = VectorStore(_data_dir(cfg) / "db")
+        existing = store.paper_modes()
+        ok = skip = 0
+        for rec in targets:
+            sid, p = rec.paper.source_id, rec.paper
+            parsed_path = _parsed_dir(cfg) / safe_dirname(sid) / "full_text.md"
+            if parsed_path.exists():
+                mode = "fulltext"
+            elif p.abstract.strip():
+                mode = "abstract"
+            else:
+                console.print(f"{WARN} [dim]{sid}[/dim] {p.title[:36]}…：无全文也无摘要，跳过")
+                continue
+            if existing.get(sid) == mode and not force:
+                skip += 1
+                continue
+            if mode == "fulltext":
+                markdown = parsed_path.read_text(encoding="utf-8")
+                chunks = split_markdown(markdown, sid, p.title)
+            else:
+                chunks = chunk_abstract(sid, p.title, p.abstract)
+            if not chunks:
+                console.print(f"{FAIL} [dim]{sid}[/dim] {p.title[:36]}…：分块结果为空")
+                continue
+            try:
+                vectors = embed([c.text for c in chunks])
+            except RuntimeError as exc:
+                console.print(f"{FAIL} {exc}")
+                raise typer.Exit(code=1) from exc
+            metas = [{**c.metadata, "mode": mode} for c in chunks]
+            store.upsert_paper_chunks(sid, [c.text for c in chunks], metas, vectors)
+            if mode == "fulltext":
+                lib.set_status(sid, "indexed", error=None)
+            console.print(
+                f"{OK} [dim]{sid}[/dim] {p.title[:36]}…（{len(chunks)} 块，{'全文' if mode == 'fulltext' else '仅摘要'}）"
+            )
+            ok += 1
+        extra = f"，{skip} 篇已索引自动跳过（--force 重建）" if skip else ""
+        console.print(f"\n索引完成：{ok} 篇入库，向量库共 {store.count()} 块{extra}")
     finally:
         lib.close()
 
