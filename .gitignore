@@ -13,3 +13,4 @@ build/
 
 # uv（uv.lock 建议提交，此处忽略本地缓存）
 uv-cache/
+samples/ 

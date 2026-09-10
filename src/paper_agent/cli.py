@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import time
 from pathlib import Path
 
@@ -12,10 +14,11 @@ from rich.table import Table
 
 from paper_agent import __version__
 from paper_agent.config import PROJECT_ROOT, EndpointConfig, load_config, resolve_endpoint
-from paper_agent.download import DownloadError, download_pdf
+from paper_agent.download import DownloadError, download_pdf, safe_dirname
 from paper_agent.graph.hello import run_hello
 from paper_agent.library import Library, PaperRecord
 from paper_agent.models import normalize_title
+from paper_agent.parsing import SUPPORTED_SUFFIXES, extract_markdown
 from paper_agent.sources import SourceUnavailable
 from paper_agent.sources import arxiv as arxiv_src
 from paper_agent.sources import europepmc as epmc_src
@@ -148,6 +151,93 @@ def download(
                 console.print(f"{FAIL} [dim]{p.source_id}[/dim] {p.title[:40]}…：{str(exc)[:120]}")
                 fail += 1
         console.print(f"\n下载完成：{ok} 成功，{fail} 失败（失败项可用同样命令重试）")
+    finally:
+        lib.close()
+
+
+@app.command()
+def add(
+    paths: list[Path] = typer.Argument(..., exists=True, readable=True, help="本地 PDF/DOCX 文件路径"),
+) -> None:
+    """导入本地论文（中文文献、已有 PDF 的入口），状态直达 downloaded。
+
+    同一文件重复导入按内容哈希判重，不会产生重复条目。
+    """
+    cfg = load_config()
+    lib = _library(cfg)
+    try:
+        for path in paths:
+            path = Path(path)
+            suffix = path.suffix.lower()
+            if suffix not in SUPPORTED_SUFFIXES:
+                console.print(f"{FAIL} {path.name}：不支持的格式（{suffix}），仅支持 PDF/DOCX")
+                continue
+            data = path.read_bytes()
+            digest = hashlib.md5(data).hexdigest()[:8]
+            stem = re.sub(r"[\W_]+", "-", path.stem, flags=re.UNICODE).strip("-")[:40] or "document"
+            sid = f"local:{stem}-{digest}"
+            dest_dir = _papers_dir(cfg) / safe_dirname(sid)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            dest = dest_dir / f"paper{suffix}"
+            if not dest.exists() or dest.read_bytes() != data:
+                dest.write_bytes(data)
+
+            title = _title_from_document(path, fallback=stem.replace("-", " "))
+            paper = _paper_from_local(sid, title, dest)
+            is_new = lib.upsert_paper(paper)
+            rec = lib.get(sid)
+            if rec is not None and rec.status == "discovered":
+                lib.set_status(sid, "downloaded", error=None, pdf_path=str(dest))
+            mark = "新导入" if is_new else "已存在（幂等合并）"
+            console.print(f"{OK} [dim]{sid}[/dim] {title}——{mark}，状态 {lib.get(sid).status}")
+    finally:
+        lib.close()
+
+
+@app.command()
+def parse(
+    ids: list[str] = typer.Argument(None, help="论文 id 片段；缺省配合 --all"),
+    all: bool = typer.Option(False, "--all", help="解析所有 downloaded 状态论文"),
+) -> None:
+    """PDF/DOCX → 分节 Markdown（缓存于 data/parsed/{id}/full_text.md）。"""
+    cfg = load_config()
+    lib = _library(cfg)
+    try:
+        targets = _resolve(lib, ids or []) if ids else [r for r in lib.list(status="downloaded")]
+        if not all and not ids:
+            targets = [r for r in lib.list(status="downloaded")]
+        if not targets:
+            console.print("没有待解析的论文（downloaded 状态）。")
+            return
+        ok = fail = 0
+        for rec in targets:
+            sid, p = rec.paper.source_id, rec.paper
+            if not rec.pdf_path or not Path(rec.pdf_path).exists():
+                console.print(f"{FAIL} [dim]{sid}[/dim] {p.title[:36]}…：原文文件缺失")
+                fail += 1
+                continue
+            try:
+                md = extract_markdown(rec.pdf_path)
+            except Exception as exc:
+                lib.set_status(sid, "downloaded", error=f"解析失败：{exc}"[:500])
+                console.print(f"{FAIL} [dim]{sid}[/dim] {p.title[:36]}…：解析失败 {exc}")
+                fail += 1
+                continue
+            # 空结果守卫仅针对 PDF（扫描版常见）；DOCX 无 OCR 问题，短文档也放行
+            min_chars = 30 if rec.pdf_path.lower().endswith(".docx") else 200
+            if len(md.strip()) < min_chars:
+                lib.set_status(sid, "downloaded", error="解析结果近乎为空（可能是扫描版 PDF）")
+                console.print(f"{FAIL} [dim]{sid}[/dim] {p.title[:36]}…：解析结果近乎为空")
+                fail += 1
+                continue
+            out = _parsed_dir(cfg) / safe_dirname(sid) / "full_text.md"
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(md, encoding="utf-8")
+            sections = md.count("\n## ")
+            lib.set_status(sid, "parsed", error=None)
+            console.print(f"{OK} [dim]{sid}[/dim] {p.title[:36]}…（{len(md)} 字符，{sections} 节）")
+            ok += 1
+        console.print(f"\n解析完成：{ok} 成功，{fail} 失败")
     finally:
         lib.close()
 
@@ -348,8 +438,45 @@ def _papers_dir(cfg: dict) -> Path:
     return _data_dir(cfg) / "papers"
 
 
+def _parsed_dir(cfg: dict) -> Path:
+    return _data_dir(cfg) / "parsed"
+
+
 def _library(cfg: dict) -> Library:
     return Library(_data_dir(cfg) / "library.db")
+
+
+def _title_from_document(path: Path, *, fallback: str) -> str:
+    """取文档内建标题元数据；取不到（或像文件名/路径）则退回清洗后的文件名。"""
+    if path.suffix.lower() == ".pdf":
+        try:
+            import pymupdf
+
+            with pymupdf.open(path) as doc:
+                meta_title = (doc.metadata or {}).get("title") or ""
+            if meta_title.strip() and "untitled" not in meta_title.lower():
+                return meta_title.strip()[:200]
+        except Exception:
+            pass
+    elif path.suffix.lower() == ".docx":
+        try:
+            from docx import Document
+
+            doc = Document(str(path))
+            for para in doc.paragraphs[:8]:
+                style = (para.style.name or "").lower() if para.style is not None else ""
+                text = para.text.strip()
+                if text and style in ("title", "heading 1"):
+                    return text[:200]
+        except Exception:
+            pass
+    return fallback
+
+
+def _paper_from_local(sid: str, title: str, dest: Path):
+    from paper_agent.models import Paper
+
+    return Paper(source="local", source_id=sid, title=title)
 
 
 if __name__ == "__main__":
