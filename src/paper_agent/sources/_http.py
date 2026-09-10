@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import requests
 
+from paper_agent.sources import SourceUnavailable
+
 UA = "paper-agent/0.1 (personal research reading tool)"
 
 
@@ -15,10 +17,13 @@ def http_get(
     timeout: tuple[float, float] = (10, 60),
 ) -> requests.Response:
     proxies = {"http": proxy, "https": proxy} if proxy else None
-    return requests.get(
-        url,
-        params=params,
-        timeout=timeout,
-        proxies=proxies,
-        headers={"User-Agent": UA},
-    )
+    try:
+        return requests.get(
+            url,
+            params=params,
+            timeout=timeout,
+            proxies=proxies,
+            headers={"User-Agent": UA},
+        )
+    except requests.RequestException as exc:
+        raise SourceUnavailable(f"请求失败：{exc}") from exc
