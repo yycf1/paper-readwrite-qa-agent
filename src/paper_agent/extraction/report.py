@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from paper_agent.llm import chat
 
 MAX_INPUT_CHARS = 36_000
@@ -27,6 +29,15 @@ _PROMPT = """你是论文精读助手。依据我提供的论文文本写一份�
 ---"""
 
 
+_FENCE_RE = re.compile(r"^\s*```(?:markdown|md)?\s*\n(.*?)\n?```\s*$", re.DOTALL)
+
+
+def strip_code_fence(text: str) -> str:
+    """LLM 有时把整份 Markdown 报告包进代码围栏，剥掉首尾围栏行。"""
+    m = _FENCE_RE.match(text.strip())
+    return (m.group(1) if m else text).strip() + "\n"
+
+
 def generate_report(markdown: str, *, chat_fn=chat) -> tuple[str, dict]:
     """生成精读报告。返回 (markdown, token用量)。chat_fn 可注入便于离线测试。"""
     reply, usage = chat_fn(
@@ -34,4 +45,4 @@ def generate_report(markdown: str, *, chat_fn=chat) -> tuple[str, dict]:
         max_tokens=2048,
         temperature=0.3,
     )
-    return reply.strip() + "\n", usage
+    return strip_code_fence(reply), usage
