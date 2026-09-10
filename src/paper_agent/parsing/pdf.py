@@ -35,8 +35,10 @@ def is_heading(line: str) -> bool:
     if m:
         rest = m.group(3).strip()
         words = rest.split()
-        # 编号标题通常 ≤10 词且不以句号结尾；正文首句 "1. We propose..." 淘汰
-        return len(words) <= 10 and not rest.endswith((".", "。"))
+        # 编号标题通常 ≤6 词且不以句号结尾；正文首句 "1. We propose..." 淘汰。
+        # 收紧到 6 词：双栏 PDF 里标题行常与正文首行粘连成一行（"2 Related Workoverall…"），
+        # ≤10 词时这类粘连行会误判为标题，章节名被污染。
+        return len(words) <= 6 and not rest.endswith((".", "。"))
     return False
 
 
