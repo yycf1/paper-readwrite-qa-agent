@@ -53,7 +53,7 @@ def answer_question(
     *,
     retriever: Retriever,
     history: list[tuple[str, str]] | None = None,
-    k: int = 5,
+    k: int = 8,
     paper_id: str | None = None,
     chat_fn=chat,
     hits: list[Hit] | None = None,
@@ -61,7 +61,8 @@ def answer_question(
     """回答一个问题，返回 (答案文本, 使用的检索命中)。
 
     hits 可外部传入（评测时检索与判定共用一次结果）；history 为近几轮
-    (问题, 回答)，用于 REPL 里的指代消解。
+    (问题, 回答)，用于 REPL 里的指代消解。k 默认 8：块均约 600 token，
+    8 块 ≈ 5k token 上下文，实测关键事实多排在 6~8 位，5 块容易漏。
     """
     if hits is None:
         hits = retriever.retrieve(question, k=k, paper_id=paper_id)

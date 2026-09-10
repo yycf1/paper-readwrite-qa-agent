@@ -1,0 +1,190 @@
+{
+  "name": "paper-agent RAG 评测集 v1",
+  "description": "3 篇论文（S-MBRec / GIST分割 / 脑肿瘤分割）26 个问答对。expect_sections 为向量库 metadata.section 的大小写不敏感子串；expect_keywords 组间 AND、组内 OR，仅 --with-llm 模式判定。事实均已对照 data/parsed 原文核验（2026-09-11）。",
+  "cases": [
+    {
+      "id": "smbrec-01",
+      "paper_id": "openalex:W4285600332",
+      "question": "S-MBRec 在 Beibei 数据集上的 Recall@10 达到多少？",
+      "expect_sections": ["Star-style"],
+      "expect_keywords": [["0.0529"]],
+      "note": "指标表因双栏解析落 在 3.5 节块内（解析产物现状）"
+    },
+    {
+      "id": "smbrec-02",
+      "paper_id": "openalex:W4285600332",
+      "question": "S-MBRec 实验使用了哪几个数据集？",
+      "expect_sections": ["Adaptive Supervised"],
+      "expect_keywords": [["Beibei"], ["Taobao"], ["Yelp"]]
+    },
+    {
+      "id": "smbrec-03",
+      "paper_id": "openalex:W4285600332",
+      "question": "S-MBRec 的自监督任务使用了哪种对比损失？",
+      "expect_sections": ["Star-style"],
+      "expect_keywords": [["InfoNCE"]]
+    },
+    {
+      "id": "smbrec-04",
+      "paper_id": "openalex:W4285600332",
+      "question": "S-MBRec 中 PMI（点互信息）用来做什么？",
+      "expect_sections": ["Star-style"],
+      "expect_keywords": [["PMI"]]
+    },
+    {
+      "id": "smbrec-05",
+      "paper_id": "openalex:W4285600332",
+      "question": "相比最强基线，S-MBRec 在 Beibei 上平均提升多少？",
+      "expect_sections": ["Hyper-parameter"],
+      "expect_keywords": [["14.1"]]
+    },
+    {
+      "id": "smbrec-06",
+      "paper_id": "openalex:W4285600332",
+      "question": "S-MBRec 的自适应监督任务用什么结构融合各行为的嵌入？",
+      "expect_sections": ["Adaptive Supervised"],
+      "expect_keywords": [["mlp", "multi-layer perceptron", "多层感知机"]]
+    },
+    {
+      "id": "smbrec-07",
+      "paper_id": "openalex:W4285600332",
+      "question": "这篇论文发表在哪个会议？",
+      "expect_sections": ["开篇"],
+      "expect_keywords": [["ijcai"]]
+    },
+    {
+      "id": "smbrec-08",
+      "paper_id": "openalex:W4285600332",
+      "question": "Beibei 数据集包含哪三种用户行为？",
+      "expect_sections": ["Adaptive Supervised"],
+      "expect_keywords": [["view", "浏览"], ["cart", "加购"], ["purchase", "购买"]]
+    },
+    {
+      "id": "smbrec-09",
+      "paper_id": "openalex:W4285600332",
+      "question": "超参数实验中任务权重 λ 取什么值时效果最好？",
+      "expect_sections": ["Hyper-parameter"],
+      "expect_keywords": [["λ"]]
+    },
+    {
+      "id": "smbrec-10",
+      "paper_id": "openalex:W4285600332",
+      "question": "S-MBRec 要解决的核心问题是什么？",
+      "expect_sections": ["Abstract", "Introduction"],
+      "expect_keywords": [["多行为", "multi-behavior"]]
+    },
+    {
+      "id": "gist-01",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "这篇论文分割的目标是什么肿瘤？用什么影像？",
+      "expect_sections": ["Abstract"],
+      "expect_keywords": [["gist", "胃肠道间质"], ["ct-pet", "ct‑pet", "pet"]]
+    },
+    {
+      "id": "gist-02",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "两阶段方法的第一阶段 DIF-Net 负责做什么？",
+      "expect_sections": ["Abstract"],
+      "expect_keywords": [["fuse", "fusion", "融合"]]
+    },
+    {
+      "id": "gist-03",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "第二阶段分割模型用什么编码器？",
+      "expect_sections": ["Segformer with MViT"],
+      "expect_keywords": [["mvit", "mix vision transformer"]]
+    },
+    {
+      "id": "gist-04",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "分割结果的 Dice 系数、mean IoU 和像素精度分别是多少？",
+      "expect_sections": ["Dice coefficient"],
+      "expect_keywords": [["93.11"], ["0.8837"], ["97.75"]]
+    },
+    {
+      "id": "gist-05",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "模型训练用什么优化器和学习率？",
+      "expect_sections": ["DIF-net model"],
+      "expect_keywords": [["adam"], ["0.001"]]
+    },
+    {
+      "id": "gist-06",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "实验数据集从哪里获取？",
+      "expect_sections": ["Data set"],
+      "expect_keywords": [["github"]]
+    },
+    {
+      "id": "gist-07",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "图像融合质量用哪些指标评估？",
+      "expect_sections": ["Performance evaluation metrics"],
+      "expect_keywords": [["psnr", "ssim"]]
+    },
+    {
+      "id": "gist-08",
+      "paper_id": "europepmc:PMC13489454",
+      "question": "文献综述里提到的 3-D U-Net 改进方法引入了什么结构？",
+      "expect_sections": ["Literature survey"],
+      "expect_keywords": [["skip", "跳跃"]]
+    },
+    {
+      "id": "brain-01",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "这篇论文用了什么脑肿瘤数据集？来自哪个平台？",
+      "expect_sections": ["Dataset"],
+      "expect_keywords": [["brats"], ["kaggle"]]
+    },
+    {
+      "id": "brain-02",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "数据集按什么比例划分训练/验证/测试？",
+      "expect_sections": ["Dataset"],
+      "expect_keywords": [["70"], ["15"]]
+    },
+    {
+      "id": "brain-03",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "训练的 batch size、epochs 和学习率分别是多少？",
+      "expect_sections": ["Dataset"],
+      "expect_keywords": [["16"], ["100"], ["0.0001", "1e-4"]]
+    },
+    {
+      "id": "brain-04",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "数据预处理包含哪些步骤？",
+      "expect_sections": ["Introduction", "Dataset"],
+      "expect_keywords": [["skull", "颅骨"], ["augmentation", "增强"]]
+    },
+    {
+      "id": "brain-05",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "CNN 架构中瓶颈层有多少个过滤器？",
+      "expect_sections": ["Methodology"],
+      "expect_keywords": [["512"]]
+    },
+    {
+      "id": "brain-06",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "训练使用了什么损失函数？",
+      "expect_sections": ["Dataset"],
+      "expect_keywords": [["binary cross entropy", "bce"]]
+    },
+    {
+      "id": "brain-07",
+      "paper_id": "europepmc:PMC13493563",
+      "question": "实验用什么深度学习框架实现？",
+      "expect_sections": ["Model configuration"],
+      "expect_keywords": [["tensorflow"], ["2.15"]]
+    },
+    {
+      "id": "scope-01",
+      "paper_id": null,
+      "question": "论文库里有没有关于蛋白质结构预测的方法？",
+      "expect_sections": null,
+      "expect_keywords": [["未提及", "没有提及", "未涉及"]],
+      "note": "范围外拒绝用例：仅 --with-llm 模式判定"
+    }
+  ]
+}
