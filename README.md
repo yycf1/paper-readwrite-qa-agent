@@ -7,7 +7,7 @@
 | 里程碑 | 状态 |
 |---|---|
 | M0 初始化与环境验证 | ✅ 完成（2026-09-11：硅基流动实测连通，BGE-M3 + DeepSeek-V3，`pa doctor` 全绿） |
-| M1 检索下载 + 文献库账本 | ⬜ |
+| M1 检索下载 + 文献库账本 | ✅ 完成（2026-09-11：OpenAlex/EuropePMC 实测通过，arXiv 待 proxy） |
 | M2 解析 + 本地导入 + 知识提取 | ⬜ |
 | M3 RAG 问答 + 评测集 | ⬜ |
 | M4 编排整合 | ⬜ |
@@ -26,6 +26,19 @@ python -m uv run pa doctor
 ```
 
 Windows 下若 `pa` 不在 PATH，用 `python -m uv run pa ...` 等价调用。
+
+## 常用命令（M1 起）
+
+```powershell
+python -m uv run pa search "graph neural network" --max 10 --year-from 2021   # 检索入库
+python -m uv run pa download --all          # 下载所有待处理论文的 OA PDF
+python -m uv run pa status                  # 文献库状态总览
+python -m uv run pa doctor                  # 环境自检（平台 + 数据源）
+```
+
+- 论文 id 可用片段（如 `W3217045679`、`PMC13451302`），多源结果自动去重；
+- 无 OA 全文的论文标记「仅摘要」，M3 起摘要也入知识库；
+- arXiv 在本机被网络屏蔽，检索自动降级；如需 arXiv，在 `config.yaml` 的 `proxy` 填本地代理端口。
 
 ## 配置说明
 
