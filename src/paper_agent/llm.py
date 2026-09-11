@@ -1,18 +1,23 @@
 """LLM 客户端：OpenAI 兼容封装，读 config.yaml 的 llm 节与 .env 的 Key。
 
-extraction 与（M3 的）rag/qa 共用；返回 (文本, token用量)，方便记账。
+extraction 与 rag/qa 共用；返回 (文本, token用量)，方便记账。
+免费档限流（如智谱 429/1305）是常态，chat 内置指数退避重试。
 """
 
 from __future__ import annotations
 
 import json
 import re
+import time
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from paper_agent.config import load_config, resolve_endpoint
 
 _JSON_FENCE_RE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.DOTALL)
+
+_MAX_ATTEMPTS = 4
+_BACKOFF_SECONDS = (10, 20, 40)
 
 
 def chat(
@@ -22,27 +27,38 @@ def chat(
     temperature: float = 0.2,
     cfg: dict | None = None,
 ) -> tuple[str, dict]:
-    """一次对话补全。返回 (回复文本, {"prompt": n, "completion": n, "model": name})。"""
+    """一次对话补全，限流时自动退避重试。返回 (回复文本, {"prompt": n, "completion": n, "model": name})。"""
     cfg = cfg or load_config()
     ep = resolve_endpoint(cfg["llm"])
     if not ep.api_key:
         raise RuntimeError("未配置 LLM API Key：请复制 .env.example 为 .env 并填入 Key")
     client = OpenAI(base_url=ep.base_url, api_key=ep.api_key, timeout=180, max_retries=2)
-    resp = client.chat.completions.create(
-        model=ep.model,
-        messages=messages,
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    usage = resp.usage
-    return (
-        resp.choices[0].message.content or "",
-        {
-            "prompt": getattr(usage, "prompt_tokens", 0) or 0,
-            "completion": getattr(usage, "completion_tokens", 0) or 0,
-            "model": ep.model,
-        },
-    )
+    last_exc: RateLimitError | None = None
+    for attempt in range(_MAX_ATTEMPTS):
+        try:
+            resp = client.chat.completions.create(
+                model=ep.model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            usage = resp.usage
+            return (
+                resp.choices[0].message.content or "",
+                {
+                    "prompt": getattr(usage, "prompt_tokens", 0) or 0,
+                    "completion": getattr(usage, "completion_tokens", 0) or 0,
+                    "model": ep.model,
+                },
+            )
+        except RateLimitError as exc:
+            last_exc = exc
+            if attempt < _MAX_ATTEMPTS - 1:
+                wait = _BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)]
+                time.sleep(wait)
+    raise RuntimeError(
+        f"LLM 连续 {_MAX_ATTEMPTS} 次被限流（免费档调用频率限制），已退避重试无效：{last_exc}"
+    ) from last_exc
 
 
 def parse_json_reply(text: str) -> dict:

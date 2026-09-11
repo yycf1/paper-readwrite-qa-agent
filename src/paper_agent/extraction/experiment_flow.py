@@ -115,13 +115,43 @@ _EMPTY_DEFAULTS: dict[str, object] = {
 }
 
 
+_REASK_INSTRUCTION = (
+    "上面的回复无法解析为 JSON。请严格重新回答：只输出一个 JSON 对象，"
+    "不要任何解释、Markdown 围栏或其它文字。"
+)
+
+
 def extract_experiment(markdown: str, *, chat_fn=chat) -> dict:
-    """从解析文本提取 experiment.json。chat_fn 可注入便于离线测试。"""
+    """从解析文本提取 experiment.json；解析失败/空回复时带上下文重问一次。
+
+    chat_fn 可注入便于离线测试。
+    """
     paper_text = markdown[:MAX_INPUT_CHARS]
+    prompt = _PROMPT.format(paper_text=paper_text)
     reply, usage = chat_fn(
-        [{"role": "user", "content": _PROMPT.format(paper_text=paper_text)}],
+        [{"role": "user", "content": prompt}],
         max_tokens=4096,
         temperature=0.1,
     )
-    data = parse_json_reply(reply)
+    try:
+        data = parse_json_reply(reply)
+    except ValueError as exc:
+        reply2, usage2 = chat_fn(
+            [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": (reply or "(空回复)")[:2000]},
+                {"role": "user", "content": _REASK_INSTRUCTION},
+            ],
+            max_tokens=4096,
+            temperature=0.0,
+        )
+        usage = {
+            "prompt": usage["prompt"] + usage2["prompt"],
+            "completion": usage["completion"] + usage2["completion"],
+            "model": usage2["model"],
+        }
+        try:
+            data = parse_json_reply(reply2)
+        except ValueError:
+            raise ValueError(f"重问后仍无法解析 JSON（首次错误：{exc}）") from exc
     return normalize_experiment(data, paper_text=paper_text, usage=usage)
