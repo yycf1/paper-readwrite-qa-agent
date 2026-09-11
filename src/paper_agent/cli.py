@@ -597,8 +597,8 @@ def run(
     console.print("\n下一步：[cyan]pa ask \"问题\"[/cyan] 开始问答，或 [cyan]pa status[/cyan] 查看总览。")
 
 
-@app.command()
-def chat() -> None:
+@app.command("chat")
+def chat_cmd() -> None:
     """交互式助手：自然语言说需求，自动路由到检索 / 问答 / 状态。"""
     cfg = load_config()
     lib = _library(cfg)
