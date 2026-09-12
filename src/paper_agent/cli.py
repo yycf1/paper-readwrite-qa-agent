@@ -601,7 +601,7 @@ def run(
 
 @app.command("chat")
 def chat_cmd() -> None:
-    """交互式助手：自然语言说需求，自动路由到检索 / 问答 / 状态。"""
+    """交互式助手：自然语言说需求，自动路由到检索 / 问答 / 状态 / 方向引导。"""
     cfg = load_config()
     lib = _library(cfg)
     store = VectorStore(paths.vector_dir(cfg))
@@ -614,7 +614,12 @@ def chat_cmd() -> None:
     }
     console.print(
         "[bold]paper-agent 助手[/bold]（自然语言，q 退出）\n"
-        "试试：[dim]「帮我找几篇联邦学习推荐的论文」「S-MBRec 的损失函数是什么」「看看库里状态」[/dim]\n"
+        "我能帮你：\n"
+        "  ① [cyan]检索新论文[/cyan]——「帮我找 2023 年以后的 transformer 综述，前 20 篇」（支持中文，自动译成英文检索词）\n"
+        "  ② [cyan]问答已入库文献[/cyan]——「S-MBRec 的损失函数是什么」（回答带出处）\n"
+        "  ③ [cyan]查看库状态[/cyan]——「看看库里进度」\n"
+        "  ④ [cyan]推荐研究方向[/cyan]——「不知道该看什么论文」（基于库内已有论文）\n"
+        "[dim]只聊科研和论文哦，别的忙帮不上～[/dim]\n"
     )
     try:
         while True:
@@ -628,14 +633,27 @@ def chat_cmd() -> None:
             if not text or text.lower() in ("q", "quit", "exit"):
                 break
             route = classify_intent(text)
-            via = "LLM" if route["via"] == "llm" else "启发式"
+            console.print(f"[dim]（{summarize_query_understanding(route)}）[/dim]")
             if route["intent"] == "exit":
                 break
             if route["intent"] == "help":
                 console.print(
-                    "我支持：①检索新论文（「帮我找…主题…的论文」）②问答已入库文献（直接提问）"
-                    "③查看库状态（「看看状态」）。也可以直接用 pa 命令。"
+                    "我支持：①检索新论文（「帮我找…主题…的论文」，可带年份/数量）"
+                    "②问答已入库文献（直接提问）③查看库状态（「看看状态」）"
+                    "④方向推荐（「不知道看什么论文」）。也可以直接用 pa 命令。"
                 )
+                continue
+            if route["intent"] == "off_topic":
+                console.print(
+                    "这个忙我帮不上——我是论文研究助手，只擅长检索论文、答疑库内文献和梳理研究方向。\n"
+                    "不如告诉我你的研究领域，我帮你找几篇论文？"
+                )
+                continue
+            if route["intent"] == "clarify":
+                console.print(route.get("clarify_question") or "你是想检索新论文，还是想问库里已有的内容？")
+                continue
+            if route["intent"] == "explore":
+                console.print(_suggest_directions(lib))
                 continue
             if route["intent"] == "status":
                 counts = lib.counts()
@@ -644,13 +662,24 @@ def chat_cmd() -> None:
                 console.print(f"文献库共 {total} 篇：{stat_line}")
                 continue
             if route["intent"] == "search":
-                topic = route["argument"] or text
-                console.print(f"[dim]（意图：检索·{via}）[/dim]检索「{topic}」…")
-                try:
-                    _counts, notes, new_ids = pipeline_search(lib, cfg, params, query=topic)
-                except Exception as exc:
-                    console.print(f"{FAIL} 检索失败：{str(exc)[:120]}")
-                    continue
+                s = route.get("search") or {}
+                topics = s.get("topics") or [route["argument"] or text]
+                run_params = dict(params)
+                if s.get("year_from"):
+                    run_params["year_from"] = s["year_from"]
+                if s.get("max_results"):
+                    run_params["max_per_source"] = s["max_results"]
+                new_ids: list[str] = []
+                notes: list[str] = []
+                for topic in topics:
+                    console.print(f"[dim]检索「{topic}」…[/dim]")
+                    try:
+                        _counts, n, ids = pipeline_search(lib, cfg, run_params, query=topic)
+                    except Exception as exc:
+                        console.print(f"{FAIL} 检索失败：{str(exc)[:120]}")
+                        continue
+                    notes.extend(n)
+                    new_ids.extend(i for i in ids if i not in new_ids)
                 for note in notes:
                     console.print(f"{WARN} {note}")
                 if new_ids:
@@ -662,7 +691,6 @@ def chat_cmd() -> None:
                 continue
             # qa
             question = route["argument"] or text
-            console.print(f"[dim]（意图：问答·{via}）[/dim]")
             if store.count() == 0:
                 console.print("向量库为空：先运行 [cyan]pa index --all[/cyan]。")
                 continue
@@ -674,6 +702,39 @@ def chat_cmd() -> None:
             console.print(f"[bold]答[/bold] {answer}\n")
     finally:
         lib.close()
+
+
+def _suggest_directions(lib: Library, *, chat_fn=chat) -> str:
+    """explore 引导：基于库内论文主题分布，让 LLM 归纳 2~3 个可探索方向。"""
+    titles = [r.paper.title for r in lib.list() if r.paper.title]
+    if len(titles) < 3:
+        return (
+            "文献库还比较空（少于 3 篇），先告诉我你的研究领域或课题关键词，"
+            "我帮你检索一批论文进来（「帮我找 XX 的论文」），再基于它们给你梳理方向。"
+        )
+    sample = "\n".join(f"- {t}" for t in titles[:60])
+    try:
+        reply, _ = chat_fn(
+            [{"role": "user", "content": (
+                "以下是一个研究者文献库中的论文标题。请归纳出 2~3 个值得深入的研究方向，"
+                "每个方向给一句话说明（为什么值得看、库内已有哪些相关论文）。只依据这些标题，"
+                "用中文输出 Markdown 列表，不要其它内容：\n" + sample
+            )}],
+            max_tokens=500,
+            temperature=0.3,
+        )
+        return reply.strip()
+    except Exception:
+        # LLM 不可用时退化为纯统计：高频词方向提示
+        from collections import Counter
+
+        words = Counter()
+        for t in titles:
+            for w in re.findall(r"[A-Za-z]{4,}|[\u4e00-\u9fff]{2,6}", t):
+                words[w.lower()] += 1
+        top = "、".join(w for w, _ in words.most_common(8))
+        return f"库内 {len(titles)} 篇论文的高频主题词：{top}。可以从这些方向深入，或直接告诉我感兴趣的关键词。"
+
 
 
 @app.command()
