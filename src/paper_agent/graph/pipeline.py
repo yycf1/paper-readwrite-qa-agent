@@ -109,6 +109,7 @@ def _relevance_scores(query: str, candidates: list, *, chat_fn) -> dict[str, tup
         [{"role": "user", "content": _SELECT_PROMPT.format(query=query, papers="\n".join(lines))}],
         max_tokens=2000,
         temperature=0.0,
+        thinking=False,  # 打分是简单任务，禁用思考防 tokens 被思考吃光
     )
     data = parse_json_reply(reply)
     known = {r.paper.source_id for r in candidates}

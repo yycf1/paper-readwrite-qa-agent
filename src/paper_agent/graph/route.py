@@ -60,6 +60,7 @@ def classify_intent(text: str, *, chat_fn=chat) -> dict:
             [{"role": "user", "content": _PROMPT.format(text=stripped)}],
             max_tokens=400,
             temperature=0.0,
+            thinking=False,  # 简单分类任务禁用思考：推理模型思考会吃光 max_tokens
         )
         data = parse_json_reply(reply)
         intent = data.get("intent")
@@ -154,8 +155,9 @@ def optimize_query(text: str, *, chat_fn=chat) -> dict:
     try:
         reply, _usage = chat_fn(
             [{"role": "user", "content": _OPTIMIZE_PROMPT.format(text=text.strip())}],
-            max_tokens=200,
+            max_tokens=300,
             temperature=0.0,
+            thinking=False,  # 简单改写任务禁用思考
         )
         data = parse_json_reply(reply)
         params = _extract_search_params(data)

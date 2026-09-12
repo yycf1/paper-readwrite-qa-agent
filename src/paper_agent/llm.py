@@ -26,13 +26,22 @@ def chat(
     max_tokens: int = 4096,
     temperature: float = 0.2,
     cfg: dict | None = None,
+    thinking: bool | None = None,
 ) -> tuple[str, dict]:
-    """一次对话补全，限流时自动退避重试。返回 (回复文本, {"prompt": n, "completion": n, "model": name})。"""
+    """一次对话补全，限流时自动退避重试。返回 (回复文本, {"prompt": n, "completion": n, "model": name})。
+
+    thinking：GLM 等混合推理模型的思考开关。None=平台默认（适合提取/报告等复杂任务）；
+    False=禁用思考——意图分类、查询优化等简单任务必须禁用，否则思考 tokens 会
+    吃光 max_tokens 导致 content 为空（M5 实测踩坑）。
+    """
     cfg = cfg or load_config()
     ep = resolve_endpoint(cfg["llm"])
     if not ep.api_key:
         raise RuntimeError("未配置 LLM API Key：请复制 .env.example 为 .env 并填入 Key")
     client = OpenAI(base_url=ep.base_url, api_key=ep.api_key, timeout=180, max_retries=2)
+    extra: dict = {}
+    if thinking is not None:
+        extra["extra_body"] = {"thinking": {"type": "enabled" if thinking else "disabled"}}
     last_exc: RateLimitError | None = None
     for attempt in range(_MAX_ATTEMPTS):
         try:
@@ -41,6 +50,7 @@ def chat(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                **extra,
             )
             usage = resp.usage
             return (
