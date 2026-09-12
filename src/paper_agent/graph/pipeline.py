@@ -22,7 +22,7 @@ from paper_agent.download import DownloadError, download_pdf, safe_dirname
 from paper_agent.extraction.experiment_flow import extract_experiment
 from paper_agent.extraction.report import generate_report
 from paper_agent.library import Library
-from paper_agent.llm import chat
+from paper_agent.llm import chat, parse_json_reply
 from paper_agent.parsing import extract_markdown
 from paper_agent.rag.embedder import embed
 from paper_agent.rag.splitter import chunk_abstract, split_markdown
@@ -89,18 +89,89 @@ def run_search(
     return counts, notes, new_ids
 
 
-def select_papers(lib: Library, params: dict) -> list[str]:
-    """无人值守选文：本轮 discovered 中按（引用数↓, 年份↓）取 top_n。
+_SELECT_PROMPT = """你是论文选文助手。研究主题：{query}
 
-    返回选中的 source_id；不改变落选论文的状态（留在库里可手动处理）。
+候选论文（id | 标题 | 摘要截断）：
+{papers}
+
+为每篇论文打相关分 0-10（≥6 = 与主题相关）。只依据标题和摘要判断，不要编造。
+只输出一个 JSON 对象：{{"scores": [{{"id": "论文id", "score": 7, "reason": "一句话理由"}}]}}
+每篇论文都要有 reason。"""
+
+
+def _relevance_scores(query: str, candidates: list, *, chat_fn) -> dict[str, tuple[int, str]]:
+    """LLM 对候选论文打相关分，返回 {source_id: (score, reason)}；任何失败抛异常由上层降级。"""
+    lines = []
+    for r in candidates[:30]:
+        abstract = (r.paper.abstract or "")[:200]
+        lines.append(f"[{r.paper.source_id}] {r.paper.title} | {abstract}")
+    reply, _usage = chat_fn(
+        [{"role": "user", "content": _SELECT_PROMPT.format(query=query, papers="\n".join(lines))}],
+        max_tokens=2000,
+        temperature=0.0,
+    )
+    data = parse_json_reply(reply)
+    known = {r.paper.source_id for r in candidates}
+    scores: dict[str, tuple[int, str]] = {}
+    for item in data.get("scores", []):
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("id") or "")
+        if sid not in known:
+            continue
+        score = item.get("score")
+        if not isinstance(score, (int, float)):
+            continue
+        score = max(0, min(10, int(score)))
+        reason = str(item.get("reason") or "").strip()
+        scores[sid] = (score, reason)
+    return scores
+
+
+def select_papers(lib: Library, params: dict, *, query: str = "", chat_fn=chat) -> tuple[list[str], str]:
+    """无人值守选文：相关性预筛（LLM 可用时）→ 按（引用数↓, 年份↓）取 top_n。
+
+    返回 (选中的 source_id 列表, 一句话选文理由)。预筛失败/候选不足时退化为
+    纯引用数排序——打不上分的候选保守保留，宁可多读不可漏读。
+    不改变落选论文的状态（留在库里可手动处理）。
     """
     year_from = params.get("year_from")
+    top_n = params["top_n"]
     candidates = [
         r for r in lib.list(status="discovered")
         if year_from is None or (r.paper.year or 0) >= year_from
     ]
     candidates.sort(key=lambda r: (r.paper.citations or 0, r.paper.year or 0), reverse=True)
-    return [r.paper.source_id for r in candidates[: params["top_n"]]]
+
+    if len(candidates) <= top_n:
+        return (
+            [r.paper.source_id for r in candidates],
+            f"候选 {len(candidates)} 篇未超过 top_n={top_n}，全部保留",
+        )
+
+    filtered_note = ""
+    if query:
+        try:
+            scores = _relevance_scores(query, candidates, chat_fn=chat_fn)
+            relevant = [r for r in candidates if scores.get(r.paper.source_id, (10, ""))[0] >= 6]
+            if relevant:
+                reasons = [
+                    reason for r in relevant
+                    if (reason := scores.get(r.paper.source_id, (0, ""))[1])
+                ]
+                example = "；".join(reasons[:2])
+                filtered_note = (
+                    f"相关性预筛 {len(candidates)}→{len(relevant)} 篇"
+                    + (f"（如：{example}）" if example else "")
+                )
+                candidates = relevant
+        except Exception:
+            filtered_note = "相关性预筛不可用（LLM 失败），按引用数直接选"
+
+    selected = [r.paper.source_id for r in candidates[:top_n]]
+    reason = filtered_note or "按引用数直接选"
+    reason += f"，按引用数取前 {top_n} 篇"
+    return selected, reason
 
 
 # ---------------------------------------------------------------------------
@@ -304,10 +375,12 @@ def build_pipeline_graph():
             try:
                 if stage == "search":
                     counts, notes, _new_ids = run_search(lib, cfg, state["params"], query=state["query"])
-                    selected = select_papers(lib, {**_default_params(cfg), **state["params"]})
+                    selected, reason = select_papers(
+                        lib, {**_default_params(cfg), **state["params"]}, query=state["query"],
+                    )
                     return {
                         "stats": {**state["stats"], **counts, "selected_n": len(selected)},
-                        "notes": state["notes"] + notes,
+                        "notes": state["notes"] + notes + [f"选文：{reason}"],
                         "selected": selected,
                     }
                 fn = {

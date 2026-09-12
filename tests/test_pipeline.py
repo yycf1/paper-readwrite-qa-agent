@@ -213,6 +213,63 @@ def test_select_papers_orders_by_citations(tmp_path):
             lib.upsert_paper(_paper(sid, sid, citations=cites, year=year))
         params = {"top_n": 3, "year_from": None}
         # 引用数优先，年份仅作并列 tiebreak；无引用按 0 计
-        assert pl.select_papers(lib, params) == ["a:C", "a:B", "a:A"]
+        selected, reason = pl.select_papers(lib, params)
+        assert selected == ["a:C", "a:B", "a:A"]
+        assert "按引用数" in reason  # 无 query 时不做预筛，直接按引用数选
+    finally:
+        lib.close()
+
+
+def test_select_papers_relevance_filter(tmp_path):
+    """LLM 预筛：不相关论文被过滤，理由可解释；打不上分的候选保守保留。"""
+    lib = Library(tmp_path / "lib.db")
+    try:
+        papers = [
+            ("openalex:W1", "Deep learning for GNN recommendation", 100),
+            ("openalex:W2", "Cooking recipes with neural sparks", 999),  # 引用高但不相关
+            ("openalex:W3", "Graph neural networks for recsys survey", 80),
+            ("openalex:W4", "Another unrelated paper about birds", 60),
+        ]
+        for sid, title, cites in papers:
+            lib.upsert_paper(_paper(sid, title, citations=cites, year=2023))
+        params = {"top_n": 2, "year_from": None}
+
+        def fake_chat(messages, **kw):
+            reply = (
+                '{"scores": ['
+                '{"id": "openalex:W1", "score": 9, "reason": "GNN推荐方法"}, '
+                '{"id": "openalex:W2", "score": 1, "reason": "烹饪无关"}, '
+                '{"id": "openalex:W3", "score": 8, "reason": "GNN推荐综述"}, '
+                '{"id": "openalex:W4", "score": 2, "reason": "鸟类无关"}]}'
+            )
+            return reply, {"prompt": 1, "completion": 1}
+
+        selected, reason = pl.select_papers(
+            lib, params, query="graph neural network recommendation", chat_fn=fake_chat,
+        )
+        assert selected == ["openalex:W1", "openalex:W3"]  # 高引但不相关的 W2 被预筛掉
+        assert "4→2" in reason and "GNN" in reason
+
+    finally:
+        lib.close()
+
+
+def test_select_papers_llm_failure_falls_back(tmp_path):
+    """LLM 失败 → 退化为纯引用数排序，理由注明预筛不可用。"""
+    lib = Library(tmp_path / "lib.db")
+    try:
+        for i in range(5):
+            lib.upsert_paper(_paper(f"openalex:W{i}", f"T{i}", citations=100 - i, year=2023))
+        params = {"top_n": 2, "year_from": None}
+
+        def broken(messages, **kw):
+            raise RuntimeError("no key")
+
+        selected, reason = pl.select_papers(
+            lib, params, query="any topic", chat_fn=broken,
+        )
+        assert selected == ["openalex:W0", "openalex:W1"]
+        assert "预筛不可用" in reason
+
     finally:
         lib.close()
