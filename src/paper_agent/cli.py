@@ -30,6 +30,7 @@ from paper_agent.rag.qa import Retriever, answer_question
 from paper_agent.rag.splitter import chunk_abstract, split_markdown
 from paper_agent.rag.vectorstore import VectorStore
 from paper_agent.sources import SourceUnavailable
+from paper_agent.tools import search_source_tool, validate_papers
 from paper_agent.sources import arxiv as arxiv_src
 from paper_agent.sources import europepmc as epmc_src
 from paper_agent.sources import openalex as oa_src
@@ -86,17 +87,18 @@ def search(
             if not (source_cfg.get(name) or {}).get("enabled", True):
                 console.print(f"{SKIP} {name}：已在 config.yaml 停用")
                 continue
-            module = SOURCE_MODULES[name]
-            try:
-                if name == "openalex":
-                    email = (source_cfg.get("openalex") or {}).get("email", "") or ""
-                    papers = module.search(query, max, year_from, proxy=proxy, email=email)
-                else:
-                    papers = module.search(query, max, year_from, proxy=proxy)
-            except SourceUnavailable as exc:
-                hint = "可在 config.yaml 配置 proxy" if name == "arxiv" else "请检查网络"
-                console.print(f"{WARN} {name} 不可用（{exc}），已跳过——{hint}")
+            email = (source_cfg.get(name) or {}).get("email", "") or ""
+            result = search_source_tool(
+                name, query=query, max_results=max, year_from=year_from, proxy=proxy, email=email,
+            )
+            if result.status == "fatal":
+                console.print(f"{FAIL} {name}：{result.error}")
                 continue
+            if result.status != "ok":
+                hint = "可在 config.yaml 配置 proxy" if name == "arxiv" else "请检查网络"
+                console.print(f"{WARN} {name} 不可用（{result.error}），已跳过——{hint}")
+                continue
+            papers = result.data
             added = 0
             for p in papers:
                 dup_id = _duplicate_of(lib, seen, p)
