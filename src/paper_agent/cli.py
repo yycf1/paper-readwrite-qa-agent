@@ -30,7 +30,7 @@ from paper_agent.rag.qa import Retriever, answer_question
 from paper_agent.rag.splitter import chunk_abstract, split_markdown
 from paper_agent.rag.vectorstore import VectorStore
 from paper_agent.sources import SourceUnavailable
-from paper_agent.tools import search_source_tool, validate_papers
+from paper_agent.tools import filter_valid_papers, search_source_tool, validate_papers
 from paper_agent.sources import arxiv as arxiv_src
 from paper_agent.sources import europepmc as epmc_src
 from paper_agent.sources import openalex as oa_src
@@ -761,10 +761,15 @@ def _suggest_directions(lib: Library, *, chat_fn=chat) -> str:
                 "每个方向给一句话说明（为什么值得看、库内已有哪些相关论文）。只依据这些标题，"
                 "用中文输出 Markdown 列表，不要其它内容：\n" + sample
             )}],
-            max_tokens=500,
+            max_tokens=800,
             temperature=0.3,
+            thinking=False,  # 简单归纳任务禁用思考，防思考 tokens 吃光 max_tokens
         )
-        return reply.strip()
+        text = reply.strip()
+        return text if text else (
+            f"库内已有 {len(titles)} 篇论文。直接告诉我你感兴趣的关键词，"
+            "我帮你检索深入（「帮我找 XX 的论文」）。"
+        )
     except Exception:
         # LLM 不可用时退化为纯统计：高频词方向提示
         from collections import Counter
