@@ -104,16 +104,32 @@ def search_source_tool(
 
 
 def validate_papers(papers: list[Paper], *, current_year: int = 2026) -> list[str]:
-    """校验检索结果结构合理性，返回问题列表（空列表 = 通过）。"""
+    """校验检索结果结构合理性，返回问题列表（空列表 = 通过）。
+
+    每条 issue 以 source_id 开头，便于 filter_valid_papers 按条目过滤。
+    """
     issues: list[str] = []
     for p in papers:
         if not p.title.strip():
             issues.append(f"{p.source_id}: 标题为空")
         if not p.source_id or ":" not in p.source_id:
-            issues.append(f"source_id 非法：{p.source_id!r}")
+            issues.append(f"{p.source_id!r}: source_id 非法")
         if p.year is not None and not (1900 <= p.year <= current_year + 1):
             issues.append(f"{p.source_id}: 年份越界 {p.year}")
     return issues
+
+
+def filter_valid_papers(papers: list[Paper], *, current_year: int = 2026) -> tuple[list[Paper], list[str]]:
+    """过滤掉结构非法的论文，返回 (合法列表, 问题列表)。入库前的最后一道闸。"""
+    clean: list[Paper] = []
+    issues: list[str] = []
+    for p in papers:
+        iss = validate_papers([p], current_year=current_year)
+        if iss:
+            issues.extend(iss)
+        else:
+            clean.append(p)
+    return clean, issues
 
 
 # ---------------------------------------------------------------------------

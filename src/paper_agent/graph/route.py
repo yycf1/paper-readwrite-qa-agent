@@ -133,3 +133,35 @@ def summarize_query_understanding(route: dict) -> str:
         "exit": "退出", "help": "帮助", "search": "检索",
     }
     return f"{labels.get(intent, intent)}（{via}）"
+
+
+# ---------------------------------------------------------------------------
+# 查询优化（pa search 显式命令用）：把用户输入规范化为学术库搜索词
+# ---------------------------------------------------------------------------
+
+_OPTIMIZE_PROMPT = """把用户的论文检索需求规范化为适合英文学术数据库（OpenAlex 等）的搜索词。
+要求：中文翻译成英文学术表述；缩写展开成全称（如 GNN→graph neural network）；
+口语换成术语；复合需求拆成最多 3 个子查询。
+只输出一个 JSON 对象（不要其它内容）：
+{{"topics": ["子查询1", "子查询2"], "year_from": null, "max_results": null}}
+year_from / max_results 只在用户明确提出时填整数，否则填 null。
+
+用户输入：{text}"""
+
+
+def optimize_query(text: str, *, chat_fn=chat) -> dict:
+    """查询优化；任何失败都降级为「原样直搜」，绝不阻塞检索。"""
+    try:
+        reply, _usage = chat_fn(
+            [{"role": "user", "content": _OPTIMIZE_PROMPT.format(text=text.strip())}],
+            max_tokens=200,
+            temperature=0.0,
+        )
+        data = parse_json_reply(reply)
+        params = _extract_search_params(data)
+        if params["topics"]:
+            params["optimized"] = True
+            return params
+    except Exception:
+        pass
+    return {"topics": [text.strip()], "year_from": None, "max_results": None, "optimized": False}

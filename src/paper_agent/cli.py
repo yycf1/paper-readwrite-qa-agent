@@ -17,7 +17,7 @@ from paper_agent.config import PROJECT_ROOT, EndpointConfig, load_config, resolv
 from paper_agent.download import DownloadError, download_pdf, safe_dirname
 from paper_agent.graph.hello import run_hello
 from paper_agent.graph.pipeline import run_pipeline, run_search as pipeline_search
-from paper_agent.graph.route import classify_intent
+from paper_agent.graph.route import classify_intent, optimize_query, summarize_query_understanding
 from paper_agent.library import Library, PaperRecord
 from paper_agent.extraction.experiment_flow import extract_experiment
 from paper_agent.extraction.report import generate_report
@@ -62,14 +62,18 @@ def version() -> None:
 
 @app.command()
 def search(
-    query: str = typer.Argument(..., help="检索关键词（支持中英文）"),
+    query: str = typer.Argument(..., help="检索关键词（支持中英文，自动优化为英文检索词）"),
     source: str = typer.Option(
         "openalex,europepmc,arxiv", "--source", "-s", help="逗号分隔的数据源"
     ),
     max: int = typer.Option(10, "--max", "-m", min=1, help="每源返回条数上限"),
     year_from: int | None = typer.Option(None, "--year-from", help="只保留该年份及以后"),
+    raw: bool = typer.Option(False, "--raw", help="跳过查询优化，原样直搜"),
 ) -> None:
-    """检索论文并入库（状态 discovered），表格展示候选；跨源自动去重。"""
+    """检索论文并入库（状态 discovered），表格展示候选；跨源自动去重。
+
+    默认先用 LLM 优化查询（中译英、缩写展开、复合需求拆子查询），失败自动降级原样直搜。
+    """
     cfg = load_config()
     proxy = cfg.get("proxy", "") or ""
     source_cfg = cfg.get("sources", {}) or {}
@@ -79,48 +83,85 @@ def search(
         console.print(f"{FAIL} 未知数据源：{', '.join(unknown)}（可用：{', '.join(SOURCE_MODULES)}）")
         raise typer.Exit(code=1)
 
+    # 查询优化（失败降级原样）
+    if raw:
+        plan = {"topics": [query], "year_from": year_from, "max_results": None, "optimized": False}
+    else:
+        plan = optimize_query(query)
+        if plan["optimized"]:
+            console.print(
+                f"[dim]查询优化：{' / '.join(plan['topics'])}"
+                + (f"（{plan['year_from']} 年起）" if plan["year_from"] else "")
+                + "[/dim]"
+            )
+    eff_year = year_from or plan.get("year_from")
+    eff_max = plan.get("max_results") or max
+
     lib = _library(cfg)
     try:
         seen: dict[str, str] = {}  # 去重键（doi 或 归一化标题）→ source_id
         merged: list[PaperRecord] = []
-        for name in names:
-            if not (source_cfg.get(name) or {}).get("enabled", True):
-                console.print(f"{SKIP} {name}：已在 config.yaml 停用")
-                continue
-            email = (source_cfg.get(name) or {}).get("email", "") or ""
-            result = search_source_tool(
-                name, query=query, max_results=max, year_from=year_from, proxy=proxy, email=email,
-            )
-            if result.status == "fatal":
-                console.print(f"{FAIL} {name}：{result.error}")
-                continue
-            if result.status != "ok":
-                hint = "可在 config.yaml 配置 proxy" if name == "arxiv" else "请检查网络"
-                console.print(f"{WARN} {name} 不可用（{result.error}），已跳过——{hint}")
-                continue
-            papers = result.data
-            added = 0
-            for p in papers:
-                dup_id = _duplicate_of(lib, seen, p)
-                if dup_id:
-                    existing = lib.get(dup_id)
-                    if existing:
-                        lib.upsert_paper(p)  # 合并补充元数据（状态不变）
+        total_hits = 0
+
+        def _search_one(keyword: str) -> int:
+            """对单个查询词跑全部源并去重入库，返回本次各源返回总数。"""
+            hits = 0
+            for name in names:
+                if not (source_cfg.get(name) or {}).get("enabled", True):
+                    console.print(f"{SKIP} {name}：已在 config.yaml 停用")
                     continue
-                lib.upsert_paper(p)
-                rec = lib.get(p.source_id)
-                if rec:
-                    merged.append(rec)
-                    added += 1
-                if p.doi:
-                    seen[f"doi:{p.doi}"] = p.source_id
-                seen[f"t:{normalize_title(p.title)}"] = p.source_id
-            console.print(f"[cyan]{name}[/cyan]：{len(papers)} 条结果")
-        _print_papers(merged, title=f"检索「{query}」：{len(merged)} 篇新入库")
+                email = (source_cfg.get(name) or {}).get("email", "") or ""
+                result = search_source_tool(
+                    name, query=keyword, max_results=eff_max, year_from=eff_year,
+                    proxy=proxy, email=email,
+                )
+                if result.status == "fatal":
+                    console.print(f"{FAIL} {name}：{result.error}")
+                    continue
+                if result.status != "ok":
+                    hint = "可在 config.yaml 配置 proxy" if name == "arxiv" else "请检查网络"
+                    console.print(f"{WARN} {name} 不可用（{result.error}），已跳过——{hint}")
+                    continue
+                papers, issues = filter_valid_papers(result.data)
+                for issue in issues:
+                    console.print(f"{WARN} 结果校验拦截：{issue}")
+                hits += len(papers)
+                for p in papers:
+                    dup_id = _duplicate_of(lib, seen, p)
+                    if dup_id:
+                        existing = lib.get(dup_id)
+                        if existing:
+                            lib.upsert_paper(p)  # 合并补充元数据（状态不变）
+                        continue
+                    lib.upsert_paper(p)
+                    rec = lib.get(p.source_id)
+                    if rec:
+                        merged.append(rec)
+                    if p.doi:
+                        seen[f"doi:{p.doi}"] = p.source_id
+                    seen[f"t:{normalize_title(p.title)}"] = p.source_id
+                console.print(f"[cyan]{name}[/cyan]：「{keyword}」{len(papers)} 条结果")
+            return hits
+
+        for topic in plan["topics"]:
+            total_hits += _search_one(topic)
+
+        # 优化后的检索词全军覆没 → 回退原始词重搜一轮
+        if total_hits == 0 and plan.get("optimized"):
+            console.print("[dim]优化后的检索词没有结果，回退原始词重搜…[/dim]")
+            total_hits = _search_one(query)
+
+        label = " / ".join(plan["topics"]) if plan["optimized"] else query
+        _print_papers(merged, title=f"检索「{label}」：{len(merged)} 篇新入库（{total_hits} 条候选）")
         if merged:
             console.print(
                 "\n下一步：[cyan]pa download <id...>[/cyan] 下载 PDF，"
                 "或 [cyan]pa download --all[/cyan]"
+            )
+        elif total_hits == 0:
+            console.print(
+                "\n没有检索到结果。可以尝试：放宽或去掉 [cyan]--year-from[/cyan]、"
+                "换更通用的关键词、或加 [cyan]--raw[/cyan] 原样直搜。"
             )
     finally:
         lib.close()

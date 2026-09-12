@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from paper_agent.graph.route import classify_intent, summarize_query_understanding
+from paper_agent.graph.route import classify_intent, optimize_query, summarize_query_understanding
 
 
 def _llm_reply(payload: str):
@@ -115,3 +115,34 @@ def test_summarize_understanding() -> None:
     text = summarize_query_understanding(route)
     assert "gnn survey" in text and "2023" in text
     assert summarize_query_understanding({"intent": "off_topic", "via": "llm"}).startswith("域外")
+
+
+# ---------------------------------------------------------------------------
+# optimize_query（pa search 查询优化）
+# ---------------------------------------------------------------------------
+
+
+def test_optimize_query_translates_and_expands() -> None:
+    reply = (
+        '{"topics": ["medical image segmentation deep learning", "graph neural network"], '
+        '"year_from": 2022, "max_results": null}'
+    )
+    plan = optimize_query("基于深度学习的医学影像分割和GNN，2022年起", chat_fn=_llm_reply(reply))
+    assert plan["optimized"] is True
+    assert plan["topics"] == ["medical image segmentation deep learning", "graph neural network"]
+    assert plan["year_from"] == 2022
+
+
+def test_optimize_query_falls_back_on_failure() -> None:
+    def _broken(messages, **k):
+        raise RuntimeError("no key")
+
+    plan = optimize_query("graph neural network", chat_fn=_broken)
+    assert plan["optimized"] is False
+    assert plan["topics"] == ["graph neural network"]
+
+
+def test_optimize_query_falls_back_on_empty_topics() -> None:
+    plan = optimize_query("x", chat_fn=_llm_reply('{"topics": [], "year_from": null}'))
+    assert plan["optimized"] is False
+    assert plan["topics"] == ["x"]
