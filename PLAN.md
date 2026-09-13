@@ -1,6 +1,5 @@
 # 文献阅读复现 Agent · 一期规划（定稿）
 
-> 定稿日期：2026-09-10
 > 产品定位：**阅读助手 + 复现地基**
 > 一期完成「检索 → 下载 → 解析 → 实验知识提取 → RAG 问答」全链路 CLI 工具；二期在此之上叠加论文复现能力。
 
@@ -45,7 +44,7 @@
 
 | 决策项 | 结论 |
 |---|---|
-| 文献来源 | **OpenAlex（主力索引）+ Europe PMC（生物医学）+ arXiv（适配器保留）**。2026-09-11 本机实测：Semantic Scholar API 可达但匿名池 429 拥挤，PubMed eutils 与 arXiv 连接被重置（网络屏蔽）；OpenAlex 与 Europe PMC 直连可用且均免 Key。S2 降为可选 fallback（申请 Key 或低峰使用 + 缓存）；arXiv 走可选代理，不可达时降级跳过并标注 |
+| 文献来源 | **OpenAlex（主力索引）+ Europe PMC（生物医学）+ arXiv（适配器保留）**。本机实测：Semantic Scholar API 可达但匿名池 429 拥挤，PubMed eutils 与 arXiv 连接被重置（网络屏蔽）；OpenAlex 与 Europe PMC 直连可用且均免 Key。S2 降为可选 fallback（申请 Key 或低峰使用 + 缓存）；arXiv 走可选代理，不可达时降级跳过并标注 |
 | LLM / Embedding 平台 | 主：硅基流动（BAAI/bge-m3 embedding 长期免费、中英多语、8K 上下文；LLM 聚合 DeepSeek/Qwen/GLM，按量便宜）；备：智谱（glm-4-flash 免费档 + embedding-3）。两家均 OpenAI 兼容，`base_url + api_key + model` 配置化切换，不锁定任何一家 |
 | 免费额度风险处理 | M0 第一个任务即实测定稿配置；OpenAI 兼容抽象保证换平台只改配置 |
 | 交互形态 | CLI（Typer + rich），问答为交互 REPL |
