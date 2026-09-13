@@ -186,6 +186,51 @@ def test_analyze_skipped_without_llm_key(fake_io, monkeypatch, tmp_path):
     assert any("知识提取跳过" in n for n in state["notes"])
     # 解析/下载不受影响
     assert state["stats"]["parsed"] == 1
+    # 盲区修复：analyze 被跳过的论文入索引后不得误标 indexed（否则 pa analyze 永远扫不到）
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        assert lib.get("openalex:W1").status == "parsed"
+    finally:
+        lib.close()
+
+
+def test_index_keeps_failed_analyze_retriable(fake_io, monkeypatch, tmp_path):
+    """分析失败的论文：全文仍入索引（RAG 可检索），但状态保持 parsed 且 error 保留。"""
+    fake_io
+
+    def _bad_extract(markdown, chat_fn=None):
+        raise ValueError("模型返回坏 JSON，重问后仍失败")
+
+    monkeypatch.setattr(pl, "extract_experiment", _bad_extract)
+    params = {"max_per_source": 10, "top_n": 1, "year_from": 2020, "download_budget": 1}
+    state = _invoke("test topic", params)
+    assert state["stats"]["analyze_failed"] == 1
+    assert state["stats"]["indexed"] == 1  # 全文照样入索引
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        rec = lib.get("openalex:W1")
+        assert rec.status == "parsed"  # 不再误标 indexed
+        assert rec.error and "分析失败" in rec.error  # 错误痕迹保留
+        # pa analyze 按 parsed 状态扫描仍能捞到它重试
+        assert [r.paper.source_id for r in lib.list(status="parsed")] == ["openalex:W1"]
+    finally:
+        lib.close()
+
+
+def test_index_advances_already_indexed_analyzed(fake_io, tmp_path):
+    """先索引后分析的时序：向量库已有全文的 analyzed 论文，run_index 补推进到 indexed。"""
+    cfg, _papers, store_state = fake_io
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        lib.upsert_paper(_paper("openalex:W1", "Paper One", citations=100, year=2022))
+        lib.set_status("openalex:W1", "parsed")
+        store_state["modes"]["openalex:W1"] = "fulltext"  # 之前 pa index 已入库
+        lib.set_status("openalex:W1", "analyzed")  # 用户随后单独跑了 pa analyze
+        counts, _notes = pl.run_index(lib, cfg, selected=[])
+        assert counts["indexed"] == 0  # 不重复索引
+        assert lib.get("openalex:W1").status == "indexed"
+    finally:
+        lib.close()
 
 
 def test_download_backfills_budget_from_remaining_discovered(fake_io, tmp_path):

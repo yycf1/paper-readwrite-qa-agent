@@ -122,10 +122,10 @@ def summarize_query_understanding(route: dict) -> str:
     via = "LLM" if route["via"] == "llm" else "启发式"
     if intent == "search" and route.get("search"):
         s = route["search"]
-        parts = [f"主题：{' / '.join(s['topics']) or route['argument']}"]
-        if s["year_from"]:
+        parts = [f"主题：{' / '.join(s.get('topics') or []) or route.get('argument', '')}"]
+        if s.get("year_from"):
             parts.append(f"{s['year_from']} 年起")
-        if s["max_results"]:
+        if s.get("max_results"):
             parts.append(f"每源≤{s['max_results']} 篇")
         return f"检索（{via}）—" + "，".join(parts)
     labels = {

@@ -324,7 +324,12 @@ def run_analyze(lib: Library, cfg: dict) -> tuple[dict, list[str]]:
 
 
 def run_index(lib: Library, cfg: dict, *, selected: list[str]) -> tuple[dict, list[str]]:
-    """全文索引 parsed/analyzed 状态论文；本轮选中但无全文的论文补摘要块。"""
+    """全文索引 parsed/analyzed 状态论文；本轮选中但无全文的论文补摘要块。
+
+    状态语义：indexed 严格表示「分析 + 索引都完成」。parsed（含分析失败带
+    error）论文照样入索引保证 RAG 可检索，但保持 parsed——`pa analyze` 的
+    重试扫描仍能找到它们，错误痕迹也不被抹掉。
+    """
     counts = {"indexed": 0, "index_chunks": 0, "abstract_indexed": 0}
     notes: list[str] = []
     store = VectorStore(paths.vector_dir(cfg))
@@ -332,6 +337,9 @@ def run_index(lib: Library, cfg: dict, *, selected: list[str]) -> tuple[dict, li
     for rec in lib.list(status="parsed") + lib.list(status="analyzed"):
         sid, p = rec.paper.source_id, rec.paper
         if existing.get(sid) == "fulltext":
+            if rec.status == "analyzed":
+                # 先索引后分析的时序：向量库已有全文，这里补推进生命周期状态
+                lib.set_status(sid, "indexed", error=None)
             continue
         md_path = paths.parsed_dir(cfg) / safe_dirname(sid) / "full_text.md"
         if not md_path.exists():
@@ -343,9 +351,10 @@ def run_index(lib: Library, cfg: dict, *, selected: list[str]) -> tuple[dict, li
         vectors = embed([c.text for c in chunks])
         metas = [{**c.metadata, "mode": "fulltext"} for c in chunks]
         store.upsert_paper_chunks(sid, [c.text for c in chunks], metas, vectors)
-        lib.set_status(sid, "indexed", error=None)
         counts["indexed"] += 1
         counts["index_chunks"] += len(chunks)
+        if rec.status == "analyzed":
+            lib.set_status(sid, "indexed", error=None)
     # 本轮选中但无全文的：摘要单块入库，不改状态机
     for sid in selected:
         rec = lib.get(sid)

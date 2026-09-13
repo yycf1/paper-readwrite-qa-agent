@@ -76,4 +76,8 @@ def answer_question(
         {"role": "user", "content": _PROMPT.format(context=build_context(hits), question=question)}
     )
     answer, _usage = chat_fn(messages, max_tokens=2048, temperature=0.2)
+    if not answer.strip():
+        # GLM 混合推理模型：思考 tokens 可能吃光 max_tokens 导致空回复，
+        # 禁用思考按同参数重问一次（正常路径零额外开销）
+        answer, _usage = chat_fn(messages, max_tokens=2048, temperature=0.2, thinking=False)
     return answer.strip(), hits

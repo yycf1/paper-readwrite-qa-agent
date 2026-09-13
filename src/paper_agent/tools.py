@@ -13,8 +13,13 @@ from typing import Any, Callable, Literal
 
 from paper_agent.models import Paper
 from paper_agent.sources import SourceUnavailable
+from paper_agent.sources import arxiv as arxiv_src
+from paper_agent.sources import europepmc as epmc_src
+from paper_agent.sources import openalex as oa_src
 
 ToolStatus = Literal["ok", "retryable_error", "degraded", "fatal"]
+
+SOURCE_MODULES = {"openalex": oa_src, "europepmc": epmc_src, "arxiv": arxiv_src}
 
 
 @dataclass
@@ -78,8 +83,6 @@ def search_source_tool(
     email: str = "",
 ) -> ToolResult:
     """在单个数据源上检索论文。degraded = 该源本次不可用（跳过，不阻塞其它源）。"""
-    from paper_agent.cli import SOURCE_MODULES  # 延迟导入避免循环
-
     if source_name not in SOURCE_MODULES:
         return ToolResult(tool="search_papers", status="fatal",
                           error=f"未知数据源：{source_name}")
