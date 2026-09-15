@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from paper_agent import __version__, paths
+from paper_agent.chatstore import ChatStore
 from paper_agent.config import load_config
 from paper_agent.download import safe_dirname
 from paper_agent.graph.pipeline import run_pipeline
@@ -215,6 +216,7 @@ def api_ask(req: AskRequest) -> dict:
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
+    session_id: str | None = None
 
 
 @router.post("/chat")
@@ -227,16 +229,94 @@ def api_chat(req: ChatRequest, lib: Library = Depends(open_lib)) -> dict:
         "top_n": p.get("top_n", 5),
         "download_budget": p.get("download_budget", 10),
     }
-    reply = handle_message(
-        req.message, lib=lib, retriever=_retriever(), params=params, cfg=cfg
-    )
-    return {
-        "intent": reply.intent,
-        "reply": reply.reply,
-        "understanding": reply.understanding,
-        "notes": reply.notes,
-        "new_papers": [record_to_dict(r) for r in reply.new_papers],
-    }
+    store = ChatStore(paths.data_dir(cfg) / "library.db")
+    try:
+        sid = req.session_id
+        if sid is None:
+            sid = store.create_session(title=req.message)
+        elif not any(s["id"] == sid for s in store.list_sessions()):
+            raise HTTPException(404, f"未找到会话：{sid}（可能已删除）")
+        prior = store.get_messages(sid)
+        store.append_message(sid, role="user", content=req.message)
+        # 近几轮问答作为语境传给问答链（指代消解），取相邻的 (user, assistant) 对
+        history = [
+            (prior[i]["content"], prior[i + 1]["content"])
+            for i in range(len(prior) - 1)
+            if prior[i]["role"] == "user" and prior[i + 1]["role"] == "assistant"
+        ][-3:]
+
+        reply = handle_message(
+            req.message, lib=lib, retriever=_retriever(), params=params, cfg=cfg,
+            history=history,
+        )
+        store.append_message(
+            sid, role="assistant", content=reply.reply, intent=reply.intent,
+            understanding=reply.understanding, notes=reply.notes,
+        )
+        return {
+            "session_id": sid,
+            "intent": reply.intent,
+            "reply": reply.reply,
+            "understanding": reply.understanding,
+            "notes": reply.notes,
+            "new_papers": [record_to_dict(r) for r in reply.new_papers],
+        }
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# 会话管理
+# ---------------------------------------------------------------------------
+
+
+@router.get("/sessions")
+def api_sessions() -> dict:
+    store = _chat_store()
+    try:
+        return {"sessions": store.list_sessions()}
+    finally:
+        store.close()
+
+
+class SessionCreate(BaseModel):
+    title: str = Field("新对话", max_length=60)
+
+
+@router.post("/sessions", status_code=201)
+def api_create_session(req: SessionCreate) -> dict:
+    store = _chat_store()
+    try:
+        sid = store.create_session(title=req.title)
+        return {"id": sid, "title": req.title[:30], "message_count": 0}
+    finally:
+        store.close()
+
+
+@router.get("/sessions/{sid}/messages")
+def api_session_messages(sid: str) -> dict:
+    store = _chat_store()
+    try:
+        if not any(s["id"] == sid for s in store.list_sessions()):
+            raise HTTPException(404, f"未找到会话：{sid}")
+        return {"session_id": sid, "messages": store.get_messages(sid)}
+    finally:
+        store.close()
+
+
+@router.delete("/sessions/{sid}")
+def api_delete_session(sid: str) -> dict:
+    store = _chat_store()
+    try:
+        if not store.delete_session(sid):
+            raise HTTPException(404, f"未找到会话：{sid}")
+        return {"ok": True}
+    finally:
+        store.close()
+
+
+def _chat_store() -> ChatStore:
+    return ChatStore(paths.data_dir(load_config()) / "library.db")
 
 
 @router.get("/explore")

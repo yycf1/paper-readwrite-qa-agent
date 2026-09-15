@@ -107,6 +107,43 @@ def test_heuristic_does_not_swallow_question_mark() -> None:
     assert route["intent"] == "qa"
 
 
+def test_fast_path_skips_llm_for_short_commands() -> None:
+    """短而明确的指令走快路径（via=heuristic），不调 LLM；带条件的检索不受影响。"""
+
+    def _must_not_call(messages, **k):
+        raise AssertionError("快路径不应调用 LLM")
+
+    assert classify_intent("看看状态", chat_fn=_must_not_call)["intent"] == "status"
+    assert classify_intent("库里有多少篇论文", chat_fn=_must_not_call)["intent"] == "status"
+    assert classify_intent("不知道该看什么论文", chat_fn=_must_not_call)["intent"] == "explore"
+    assert classify_intent("退出", chat_fn=_must_not_call)["intent"] == "exit"
+    assert classify_intent("你能做什么", chat_fn=_must_not_call)["intent"] == "help"
+
+
+def test_long_question_with_keyword_word_still_goes_to_llm() -> None:
+    """长句含「状态」等词不被快路径抢跑，仍走 LLM 语义判断。"""
+    reply = '{"intent": "qa", "argument": "论文里的状态更新机制是什么"}'
+    route = classify_intent(
+        "论文里的状态更新机制是什么", chat_fn=_llm_reply(reply)
+    )
+    assert route["intent"] == "qa" and route["via"] == "llm"
+
+
+def test_search_never_fast_paths() -> None:
+    """检索必须走 LLM：年份/数量参数只能由它抽取，快路径抢跑会丢参数。"""
+
+    def _must_not_call(messages, **k):
+        raise AssertionError("检索不应走快路径")
+
+    reply = (
+        '{"intent": "search", "argument": "transformer 综述", '
+        '"topics": ["transformer survey"], "year_from": 2023, "max_results": 20}'
+    )
+    route = classify_intent("帮我找 2023 年以后 20 篇 transformer 综述", chat_fn=_llm_reply(reply))
+    assert route["intent"] == "search" and route["via"] == "llm"
+    assert route["search"]["year_from"] == 2023
+
+
 def test_summarize_understanding() -> None:
     route = {
         "intent": "search", "via": "llm", "argument": "t",

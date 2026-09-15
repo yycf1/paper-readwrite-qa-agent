@@ -164,7 +164,8 @@ def test_handle_message_search_returns_new_papers(tmp_path, monkeypatch):
             params={"max_per_source": 10, "year_from": None},
         )
         assert reply.intent == "search"
-        assert "1 篇新论文" in reply.reply
+        assert "新入库 1 篇" in reply.reply
+        assert "3 条候选" in reply.reply
         assert len(reply.new_papers) == 1
     finally:
         lib.close()

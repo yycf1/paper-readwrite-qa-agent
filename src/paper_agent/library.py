@@ -59,7 +59,9 @@ class Library:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # check_same_thread=False：Web 服务下依赖的创建与关闭可能落在不同的
+        # 线程池工作线程（anyio 不保证线程亲和）；连接本身不跨线程共享
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
 

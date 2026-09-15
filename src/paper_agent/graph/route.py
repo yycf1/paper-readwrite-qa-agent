@@ -55,6 +55,9 @@ def classify_intent(text: str, *, chat_fn=chat) -> dict:
     stripped = text.strip()
     if not stripped:
         return {"intent": "help", "argument": "", "via": "heuristic"}
+    fast = _fast_path_intent(stripped)
+    if fast is not None:
+        return fast
     try:
         reply, _usage = chat_fn(
             [{"role": "user", "content": _PROMPT.format(text=stripped)}],
@@ -78,6 +81,31 @@ def classify_intent(text: str, *, chat_fn=chat) -> dict:
     except Exception:
         pass
     return {"intent": _heuristic_intent(stripped), "argument": stripped, "via": "heuristic"}
+
+
+def _fast_path_intent(text: str) -> dict | None:
+    """高置信模式直接路由，跳过 LLM（LLM 平台慢时常见指令不再被拖住）。
+
+    只收「短而明确」的指令：长句含同类词（如提问里带「状态」二字）仍走 LLM
+    语义判断，避免快路径抢跑误路由。检索不设快路径——年份/数量等参数只能
+    由 LLM 抽取，抢跑会丢参数。
+    """
+    low = text.lower()
+    if any(w in low for w in ("退出", "再见", "bye", "exit", "quit")) and len(text) <= 10:
+        return {"intent": "exit", "argument": text, "via": "heuristic"}
+    if (
+        len(text) <= 14
+        and not any(m in text for m in ("？", "?", "是什么", "如何", "怎么", "为什么"))
+        and any(w in low for w in ("状态", "进度", "status", "多少篇", "库里有"))
+    ):
+        return {"intent": "status", "argument": text, "via": "heuristic"}
+    if len(text) <= 16 and any(
+        w in low for w in ("不知道看什么", "推荐方向", "看什么论文", "研究方向")
+    ):
+        return {"intent": "explore", "argument": text, "via": "heuristic"}
+    if any(w in low for w in ("帮助", "你能做什么", "怎么用")) or low in ("help", "?", "？"):
+        return {"intent": "help", "argument": text, "via": "heuristic"}
+    return None
 
 
 def _extract_search_params(data: dict) -> dict:

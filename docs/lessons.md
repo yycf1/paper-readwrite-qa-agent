@@ -148,6 +148,8 @@
 | DOCX 标题 | `add_heading(level=0)` 产出 Title 样式而非 Heading 0 | `style.name == "title"` 单独处理 |
 | URL 尾标点 | 正则把句尾 `.` 抓进链接 | 抓取后统一 rstrip 标点 |
 | 空结果守卫 | 200 字符阈值（防扫描版 PDF）误杀合法短 DOCX | 守卫阈值按格式失败模式区分，不搞一刀切 |
+| SQLite 线程亲和 | TestClient 全绿，真实并发下依赖卸载在另一线程 `close()` 抛 ProgrammingError | 连接建 `check_same_thread=False`；**单线程测试测不出线程亲和类 bug**，需真实部署验收 |
+| LLM 平台临时拥塞 | 同一调用平时 1~3s，拥塞期实测 54~151s（叠加限流退避） | 交互路径减少 LLM 调用数（快路径 + 复用分类产物）；前端请求超时并如实提示，不让用户以为「坏了」 |
 
 ---
 

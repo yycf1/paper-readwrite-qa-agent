@@ -143,6 +143,51 @@ def test_chat_endpoint(monkeypatch, tmp_path):
     assert client.post("/api/chat", json={"message": ""}).status_code == 422
 
 
+def test_chat_endpoint_persists_session(monkeypatch, tmp_path):
+    lib = _seed(tmp_path)
+    lib.close()
+    client = _client(monkeypatch, tmp_path)
+
+    class _Reply:
+        intent, reply, understanding = "status", "库里有 2 篇", "库状态（LLM）"
+        notes, new_papers = [], []
+
+    monkeypatch.setattr(rt, "handle_message", lambda msg, **k: _Reply())
+    r = client.post("/api/chat", json={"message": "看看状态"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["intent"] == "status"
+    sid = data["session_id"]  # 未带 session_id 时自动创建会话
+    # 校验失败：空消息 → 422
+    assert client.post("/api/chat", json={"message": ""}).status_code == 422
+
+    # 会话出现在列表，消息已持久化
+    sessions = client.get("/api/sessions").json()["sessions"]
+    assert [s["id"] for s in sessions] == [sid]
+    assert sessions[0]["message_count"] == 2
+    msgs = client.get(f"/api/sessions/{sid}/messages").json()["messages"]
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[1]["intent"] == "status"
+
+    # 继续在同一会话发言；history 作为语境传给 handle_message
+    seen = {}
+
+    def _capture(msg, **kwargs):
+        seen["history"] = kwargs.get("history")
+        return _Reply()
+
+    monkeypatch.setattr(rt, "handle_message", _capture)
+    r2 = client.post("/api/chat", json={"message": "详细说说", "session_id": sid})
+    assert r2.json()["session_id"] == sid
+    assert seen["history"] and seen["history"][0] == ("看看状态", "库里有 2 篇")
+
+    # 不存在的会话 → 404；删除后历史消失
+    assert client.post("/api/chat", json={"message": "x", "session_id": "nope"}).status_code == 404
+    assert client.delete(f"/api/sessions/{sid}").status_code == 200
+    assert client.get(f"/api/sessions/{sid}/messages").status_code == 404
+    assert client.get("/api/sessions").json()["sessions"] == []
+
+
 def test_run_job_lifecycle(monkeypatch, tmp_path):
     _seed(tmp_path).close()
     client = _client(monkeypatch, tmp_path)

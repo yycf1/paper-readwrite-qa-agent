@@ -50,8 +50,12 @@ def handle_message(
     params: dict,
     cfg: dict | None = None,
     chat_fn=chat,
+    history: list[tuple[str, str]] | None = None,
 ) -> AssistantReply:
-    """处理一条用户消息：分类意图并执行，永不抛异常（错误转成 reply）。"""
+    """处理一条用户消息：分类意图并执行，永不抛异常（错误转成 reply）。
+
+    history 为本会话近几轮 (问题, 回答)，供问答链做指代消解（「它用了什么数据集」）。
+    """
     cfg = cfg or load_config()
     route = classify_intent(text, chat_fn=chat_fn)
     understanding = summarize_query_understanding(route)
@@ -82,7 +86,7 @@ def handle_message(
     if retriever.store.count() == 0:
         return AssistantReply("qa", "向量库为空：先运行 `pa index --all` 建立索引。", understanding=understanding)
     try:
-        answer, _hits = answer_question(question, retriever=retriever)
+        answer, _hits = answer_question(question, retriever=retriever, history=history)
     except RuntimeError as exc:  # 缺 Key 等配置问题
         return AssistantReply("qa", f"问答失败：{exc}", understanding=understanding)
     return AssistantReply("qa", answer, understanding=understanding)
@@ -98,7 +102,8 @@ def _do_search(
     understanding: str,
 ) -> AssistantReply:
     s = route.get("search") or {}
-    topics = s.get("topics") or [route["argument"] or text]
+    classifier_topics = [t for t in (s.get("topics") or []) if isinstance(t, str) and t.strip()]
+    topics = classifier_topics or [route["argument"] or text]
     run_params = dict(params)
     if s.get("year_from"):
         run_params["year_from"] = s["year_from"]
@@ -107,6 +112,7 @@ def _do_search(
 
     new_papers, notes = [], []
     seen_ids: set[str] = set()
+    total_hits = 0
     for topic in topics:
         try:
             outcome = search_and_ingest(
@@ -115,20 +121,25 @@ def _do_search(
                 cfg=cfg,
                 max_results=run_params.get("max_per_source", 10),
                 year_from=run_params.get("year_from"),
+                # 意图分类已产出英文子查询时跳过检索链的重复优化（省一次 LLM 调用）
+                raw=bool(classifier_topics),
             )
         except Exception as exc:
             notes.append(f"检索「{topic}」失败：{str(exc)[:120]}")
             continue
         notes.extend(outcome.notes)
+        total_hits += outcome.total_hits
         for rec in outcome.new_papers:
             if rec.paper.source_id not in seen_ids:
                 seen_ids.add(rec.paper.source_id)
                 new_papers.append(rec)
 
     if new_papers:
-        reply = f"已检索并入库 {len(new_papers)} 篇新论文。"
+        reply = f"本轮检索到 {total_hits} 条候选，新入库 {len(new_papers)} 篇（其余与库内已有论文重复，未重复添加）。"
+    elif total_hits:
+        reply = f"本轮检索到 {total_hits} 条候选，但都已存在于文献库中，没有新入库。"
     else:
-        reply = "没有新入库的论文（可能都已存在，或各源不可用）。"
+        reply = "没有检索到结果：可以换个说法、放宽条件，或稍后重试（数据源偶尔限流）。"
     return AssistantReply("search", reply, understanding=understanding, notes=notes, new_papers=new_papers)
 
 

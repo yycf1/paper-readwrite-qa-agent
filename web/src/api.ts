@@ -61,11 +61,30 @@ export interface AskReply {
 }
 
 export interface ChatReply {
+  session_id: string;
   intent: string;
   reply: string;
   understanding: string;
   notes: string[];
   new_papers: Paper[];
+}
+
+export interface ChatSession {
+  id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface ChatMessage {
+  id: number;
+  role: "user" | "assistant";
+  content: string;
+  intent: string | null;
+  understanding: string | null;
+  notes: string[];
+  created_at: string;
 }
 
 export interface Job {
@@ -78,11 +97,24 @@ export interface Job {
 
 const BASE = ""; // 开发模式经 Vite 代理转发到 pa serve；生产由 FastAPI 同端口托管
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}/api${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+async function req<T>(path: string, init?: RequestInit, timeoutMs = 120_000): Promise<T> {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api${path}`, {
+      headers: { "Content-Type": "application/json" },
+      ...init,
+      signal: ctrl.signal,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new Error("请求超时（LLM 平台响应慢或数据源限流），请稍后重试");
+    }
+    throw new Error("网络错误：服务是否已启动（pa serve）？");
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
     let detail = `${res.status}`;
     try {
@@ -111,8 +143,18 @@ export const api = {
     }),
   ask: (question: string, paper_id?: string) =>
     req<AskReply>("/ask", { method: "POST", body: JSON.stringify({ question, paper_id }) }),
-  chat: (message: string) =>
-    req<ChatReply>("/chat", { method: "POST", body: JSON.stringify({ message }) }),
+  chat: (message: string, session_id?: string | null) =>
+    req<ChatReply>("/chat", {
+      method: "POST",
+      body: JSON.stringify({ message, session_id: session_id ?? undefined }),
+    }),
+  sessions: () => req<{ sessions: ChatSession[] }>("/sessions"),
+  createSession: (title = "新对话") =>
+    req<ChatSession>("/sessions", { method: "POST", body: JSON.stringify({ title }) }),
+  sessionMessages: (sid: string) =>
+    req<{ session_id: string; messages: ChatMessage[] }>(`/sessions/${sid}/messages`),
+  deleteSession: (sid: string) =>
+    req<{ ok: boolean }>(`/sessions/${sid}`, { method: "DELETE" }),
   process: (id: string) =>
     req<Job>(`/papers/${encodeURIComponent(id)}/process`, { method: "POST" }),
   run: (query: string) =>
