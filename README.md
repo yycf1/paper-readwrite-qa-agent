@@ -13,6 +13,8 @@
 | M4 编排整合 | ✅ 完成（`pa run` 全链路 + 断点续跑实测通过；analyze→问答两环待 `ZHIPU_API_KEY` 后端到端验收） |
 | M5 检索智能化与工具契约 | ✅ 完成（中文查询优化、意图理解一体化、域外拒绝/方向引导、相关性预筛，实测全通过） |
 | M6 健壮性收尾与 Web 化地基 | ✅ 完成（状态机盲区根治、GitHub Actions CI、service 层下沉 + CLI 拆包、qa 空回复兜底） |
+| M7 Web 服务层 | ✅ 完成（FastAPI REST API、后台任务 + 轮询、`pa serve`，全部端点真实实测） |
+| M8 Web 界面 | ✅ 完成（React + TypeScript 文献库/助手双页、一键处理、问答带出处、深链，FastAPI 同端口托管） |
 
 ## 快速开始
 
@@ -44,7 +46,21 @@ python -m uv run pa chat                    # 自然语言助手（检索/问答
 python -m uv run pa eval                    # RAG 回归评测（--with-llm 加测答案质量）
 python -m uv run pa status                  # 文献库状态总览
 python -m uv run pa doctor                  # 环境自检（平台 + 数据源）
+python -m uv run pa serve                   # Web 界面 + REST API（http://127.0.0.1:8000）
 ```
+
+## Web 界面
+
+`pa serve` 后浏览器打开 <http://127.0.0.1:8000>：
+
+- **文献库**：检索入库（支持中文+年份）、状态过滤、论文详情（精读报告 / 实验结构 / 全文）、
+  「一键处理」（下载→解析→知识提取→索引，带步骤进度）；
+- **助手**：自然语言对话（检索 / 问答 / 状态 / 方向引导），问答带可点击出处；
+- 支持深链：`?paper=<id>` 直开论文详情，`?tab=chat` 直开助手。
+
+前端开发模式：`cd web && npm install && npm run dev`（Vite 端口 5173，/api 自动代理到 8000）；
+改前端代码后 `npm run build` 重新生成 `web/dist`，`pa serve` 即托管最新产物。
+API 文档（Swagger）在 <http://127.0.0.1:8000/docs>。
 
 - 论文 id 可用片段（如 `W3217045679`、`PMC13451302`），多源结果自动去重；
 - `pa chat` 支持带条件的自然语言检索（「找 2023 年以后的 XX 综述，前 20 篇」，自动抽取年份/数量并翻译成英文检索词）、方向推荐（「不知道看什么论文」）；与科研无关的请求会被礼貌拒绝；
