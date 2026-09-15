@@ -23,6 +23,23 @@ def version() -> None:
 
 
 @app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host", help="监听地址"),
+    port: int = typer.Option(8000, "--port", "-p", help="监听端口"),
+    reload: bool = typer.Option(False, "--reload", help="开发模式：代码改动自动重启"),
+) -> None:
+    """启动 Web 服务（REST API + 界面，http://127.0.0.1:8000）。"""
+    import uvicorn
+
+    console.print(f"[bold]paper-agent Web 服务[/bold] → http://{host}:{port}")
+    console.print("[dim]API 文档 http://%s:%d/docs ｜ Ctrl+C 停止[/dim]" % (host, port))
+    if reload:
+        uvicorn.run("paper_agent.server.app:app", host=host, port=port, reload=True)
+    else:
+        uvicorn.run("paper_agent.server.app:app", host=host, port=port)
+
+
+@app.command()
 def doctor() -> None:
     """环境自检：配置 → API Key → 平台连通 → 数据源连通 → LangGraph 图执行。"""
     console.print("[bold]paper-agent 环境自检[/bold]\n")
