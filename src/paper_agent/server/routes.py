@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-from typing import Literal
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from paper_agent import __version__, paths
@@ -14,14 +14,18 @@ from paper_agent.config import load_config
 from paper_agent.download import safe_dirname
 from paper_agent.graph.pipeline import run_pipeline
 from paper_agent.library import Library, PaperRecord
+from paper_agent.models import Paper
 from paper_agent.rag.qa import Retriever, answer_question
 from paper_agent.rag.vectorstore import VectorStore
 from paper_agent.services.assistant import handle_message, suggest_directions
+from paper_agent.services.library_ops import UnsupportedFormat, delete_paper, import_local_file
 from paper_agent.services.process import process_paper
-from paper_agent.services.search import search_and_ingest
+from paper_agent.services.search import PreviewResult, ingest_papers, search_sources
 from paper_agent.server import jobs
 
 router = APIRouter()
+
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50MB
 
 
 # ---------------------------------------------------------------------------
@@ -46,9 +50,8 @@ def _retriever() -> Retriever:
 # ---------------------------------------------------------------------------
 
 
-def record_to_dict(rec: PaperRecord, *, with_abstract: bool = False) -> dict:
-    p = rec.paper
-    out = {
+def paper_to_dict(p: Paper) -> dict:
+    return {
         "source_id": p.source_id,
         "source": p.source,
         "title": p.title,
@@ -57,13 +60,16 @@ def record_to_dict(rec: PaperRecord, *, with_abstract: bool = False) -> dict:
         "doi": p.doi,
         "citations": p.citations,
         "has_pdf": bool(p.pdf_urls),
+        "pdf_urls": p.pdf_urls,
         "landing_page": p.landing_page,
-        "status": rec.status,
-        "error": rec.error,
-        "added_at": rec.added_at,
+        "abstract_only": p.abstract_only,
     }
-    if with_abstract:
-        out["abstract"] = p.abstract
+
+
+def record_to_dict(rec: PaperRecord, *, with_abstract: bool = False) -> dict:
+    out = paper_to_dict(rec.paper)
+    out["abstract"] = rec.paper.abstract if with_abstract else ""
+    out.update({"status": rec.status, "error": rec.error, "added_at": rec.added_at, "tag": rec.tag})
     return out
 
 
@@ -96,12 +102,13 @@ def api_status() -> dict:
 @router.get("/papers")
 def api_papers(
     status: str | None = Query(None, description="按状态过滤"),
+    tag: str | None = Query(None, description="按分组标签过滤"),
     q: str | None = Query(None, description="标题/作者/DOI 模糊匹配"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     lib: Library = Depends(open_lib),
 ) -> dict:
-    records = lib.list(status=status)
+    records = lib.list(status=status, tag=tag)
     if q:
         needle = q.lower()
         records = [
@@ -114,6 +121,15 @@ def api_papers(
         "total": len(records),
         "papers": [record_to_dict(r) for r in records[offset: offset + limit]],
     }
+
+
+@router.get("/tags")
+def api_tags(lib: Library = Depends(open_lib)) -> dict:
+    """分组标签 → 数量，外加按数据源的统计（分组导航用）。"""
+    by_source: dict[str, int] = {}
+    for r in lib.list():
+        by_source[r.paper.source] = by_source.get(r.paper.source, 0) + 1
+    return {"tags": lib.tags(), "sources": by_source}
 
 
 @router.get("/papers/{sid}")
@@ -163,9 +179,10 @@ class SearchRequest(BaseModel):
 
 @router.post("/search")
 def api_search(req: SearchRequest, lib: Library = Depends(open_lib)) -> dict:
+    """检索预览：不写库，返回候选清单（已在库中的带 duplicate_of 标记）。"""
     cfg = load_config()
     try:
-        outcome = search_and_ingest(
+        preview = search_sources(
             req.query, lib=lib, cfg=cfg, sources=req.sources,
             max_results=req.max_results, year_from=req.year_from, raw=req.raw,
         )
@@ -173,14 +190,106 @@ def api_search(req: SearchRequest, lib: Library = Depends(open_lib)) -> dict:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:  # 缺 Key 等环境问题
         raise HTTPException(503, str(exc)) from exc
+    return _preview_to_dict(preview)
+
+
+def _preview_to_dict(preview: PreviewResult) -> dict:
     return {
-        "new_papers": [record_to_dict(r, with_abstract=True) for r in outcome.new_papers],
-        "total_hits": outcome.total_hits,
-        "notes": outcome.notes,
-        "source_hits": outcome.source_hits,
-        "topics": outcome.plan.get("topics", [req.query]),
-        "optimized": outcome.plan.get("optimized", False),
+        "candidates": [
+            {
+                **paper_to_dict(c.paper),
+                "abstract": c.paper.abstract,
+                "duplicate_of": c.duplicate_of,
+            }
+            for c in preview.candidates
+        ],
+        "total_hits": preview.total_hits,
+        "notes": preview.notes,
+        "source_hits": preview.source_hits,
+        "topics": preview.plan.get("topics", []),
+        "optimized": preview.plan.get("optimized", False),
     }
+
+
+class PaperIn(BaseModel):
+    source: str
+    source_id: str
+    title: str
+    authors: list[str] = []
+    abstract: str = ""
+    year: int | None = None
+    doi: str | None = None
+    citations: int | None = None
+    pdf_urls: list[str] = []
+    landing_page: str | None = None
+    abstract_only: bool = False
+
+
+class IngestRequest(BaseModel):
+    papers: list[PaperIn] = Field(min_length=1, max_length=200)
+    tag: str = Field("", max_length=60)
+
+
+@router.post("/papers/ingest")
+def api_ingest(req: IngestRequest, lib: Library = Depends(open_lib)) -> dict:
+    """入库预览时选中的候选；重复项幂等合并（不重复计数为新论文）。"""
+    papers = [
+        Paper(
+            source=p.source, source_id=p.source_id, title=p.title, authors=p.authors,
+            abstract=p.abstract, year=p.year, doi=p.doi, citations=p.citations,
+            pdf_urls=p.pdf_urls, landing_page=p.landing_page, abstract_only=p.abstract_only,
+        )
+        for p in req.papers
+    ]
+    result = ingest_papers(papers, lib=lib, tag=req.tag or None)
+    return {
+        "ingested": len(result.new_papers),
+        "duplicates": result.duplicates,
+        "papers": [record_to_dict(r) for r in result.new_papers],
+    }
+
+
+@router.delete("/papers/{sid}")
+def api_delete_paper(sid: str, lib: Library = Depends(open_lib)) -> dict:
+    """全链删除：账本 + 向量块 + 原文/解析/知识产物。"""
+    if lib.get(sid) is None:
+        matches = lib.find(sid)
+        if len(matches) == 1:
+            sid = matches[0]
+        elif len(matches) > 1:
+            raise HTTPException(400, f"「{sid}」匹配多条：{', '.join(matches)}")
+        else:
+            raise HTTPException(404, f"未找到论文：{sid}")
+    ok = delete_paper(sid, cfg=load_config(), lib=lib)
+    return {"ok": ok, "source_id": sid}
+
+
+@router.post("/papers/upload", status_code=201)
+def api_upload_paper(
+    file: UploadFile = File(...),
+    lib: Library = Depends(open_lib),
+) -> dict:
+    """上传本地 PDF/DOCX：内容哈希幂等，状态直达 downloaded（可再一键处理）。"""
+    cfg = load_config()
+    name = file.filename or "document.pdf"
+    dest_dir = paths.data_dir(cfg) / "uploads"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / Path(name).name
+    size = 0
+    with dest.open("wb") as out:
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(413, "文件超过 50MB 上限")
+            out.write(chunk)
+    try:
+        rec, is_new = import_local_file(dest, cfg=cfg, lib=lib)
+    except UnsupportedFormat as exc:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(400, str(exc)) from exc
+    return {"is_new": is_new, "paper": record_to_dict(rec, with_abstract=True)}
 
 
 class AskRequest(BaseModel):

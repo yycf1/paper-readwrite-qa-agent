@@ -83,7 +83,7 @@ def run_search(
         for p in papers:
             if lib.find_duplicate(p):
                 continue
-            lib.upsert_paper(p)
+            lib.upsert_paper(p, tag=query)  # 分组标签：哪次主题检索带进来的
             new_ids.append(p.source_id)
             counts["new"] += 1
     return counts, notes, new_ids

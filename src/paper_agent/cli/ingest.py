@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from pathlib import Path
 
 import typer
@@ -27,10 +25,8 @@ from paper_agent.config import load_config
 from paper_agent.download import DownloadError, download_pdf, safe_dirname
 from paper_agent.extraction.experiment_flow import extract_experiment
 from paper_agent.extraction.report import generate_report
-from paper_agent.library import PaperRecord
 from paper_agent.llm import chat
-from paper_agent.models import normalize_title  # noqa: F401  re-export 供旧脚本
-from paper_agent.parsing import SUPPORTED_SUFFIXES, extract_markdown
+from paper_agent.parsing import extract_markdown
 from paper_agent.rag.embedder import embed
 from paper_agent.rag.splitter import chunk_abstract, split_markdown
 from paper_agent.rag.vectorstore import VectorStore
@@ -143,33 +139,19 @@ def add(
 
     同一文件重复导入按内容哈希判重，不会产生重复条目。
     """
+    from paper_agent.services.library_ops import UnsupportedFormat, import_local_file
+
     cfg = load_config()
     lib = _library(cfg)
     try:
         for path in paths:
-            path = Path(path)
-            suffix = path.suffix.lower()
-            if suffix not in SUPPORTED_SUFFIXES:
-                console.print(f"{FAIL} {path.name}：不支持的格式（{suffix}），仅支持 PDF/DOCX")
+            try:
+                rec, is_new = import_local_file(Path(path), cfg=cfg, lib=lib)
+            except UnsupportedFormat as exc:
+                console.print(f"{FAIL} {Path(path).name}：{exc}")
                 continue
-            data = path.read_bytes()
-            digest = hashlib.md5(data).hexdigest()[:8]
-            stem = re.sub(r"[\W_]+", "-", path.stem, flags=re.UNICODE).strip("-")[:40] or "document"
-            sid = f"local:{stem}-{digest}"
-            dest_dir = _papers_dir(cfg) / safe_dirname(sid)
-            dest_dir.mkdir(parents=True, exist_ok=True)
-            dest = dest_dir / f"paper{suffix}"
-            if not dest.exists() or dest.read_bytes() != data:
-                dest.write_bytes(data)
-
-            title = _title_from_document(path, fallback=stem.replace("-", " "))
-            paper = _paper_from_local(sid, title)
-            is_new = lib.upsert_paper(paper)
-            rec = lib.get(sid)
-            if rec is not None and rec.status == "discovered":
-                lib.set_status(sid, "downloaded", error=None, pdf_path=str(dest))
             mark = "新导入" if is_new else "已存在（幂等合并）"
-            console.print(f"{OK} [dim]{sid}[/dim] {title}——{mark}，状态 {lib.get(sid).status}")
+            console.print(f"{OK} [dim]{rec.paper.source_id}[/dim] {rec.paper.title}——{mark}，状态 {rec.status}")
     finally:
         lib.close()
 
@@ -374,36 +356,3 @@ def index(
         console.print(f"\n索引完成：{ok} 篇入库，向量库共 {store.count()} 块{extra}")
     finally:
         lib.close()
-
-
-def _title_from_document(path: Path, *, fallback: str) -> str:
-    """取文档内建标题元数据；取不到（或像文件名/路径）则退回清洗后的文件名。"""
-    if path.suffix.lower() == ".pdf":
-        try:
-            import pymupdf
-
-            with pymupdf.open(path) as doc:
-                meta_title = (doc.metadata or {}).get("title") or ""
-            if meta_title.strip() and "untitled" not in meta_title.lower():
-                return meta_title.strip()[:200]
-        except Exception:
-            pass
-    elif path.suffix.lower() == ".docx":
-        try:
-            from docx import Document
-
-            doc = Document(str(path))
-            for para in doc.paragraphs[:8]:
-                style = (para.style.name or "").lower() if para.style is not None else ""
-                text = para.text.strip()
-                if text and style in ("title", "heading 1"):
-                    return text[:200]
-        except Exception:
-            pass
-    return fallback
-
-
-def _paper_from_local(sid: str, title: str):
-    from paper_agent.models import Paper
-
-    return Paper(source="local", source_id=sid, title=title)

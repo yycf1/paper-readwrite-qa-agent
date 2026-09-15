@@ -53,17 +53,33 @@ export default function PaperDetail({
   const processing = job?.status === "running";
   const steps = ((job?.result?.steps as { stage: string; ok: boolean; detail: string }[]) ?? []);
 
+  const doDelete = async () => {
+    if (!window.confirm(`确定删除《${paper.title.slice(0, 40)}…》？\n将同时删除其原文、解析文本、知识与索引产物，不可恢复。`)) return;
+    setErr("");
+    try {
+      await api.deletePaper(id);
+      onChanged();
+      onClose();
+    } catch (e) {
+      setErr(String(e));
+    }
+  };
+
   return (
     <div className="detail-pane">
       <div style={{ display: "flex", justifyContent: "space-between", gap: 10 }}>
         <h2>{paper.title}</h2>
-        <button className="primary" style={{ whiteSpace: "nowrap", height: 36 }} onClick={process} disabled={processing}>
-          {processing ? "处理中…" : "一键处理"}
-        </button>
+        <div style={{ display: "flex", gap: 8, whiteSpace: "nowrap", height: 36 }}>
+          <button className="danger" onClick={doDelete}>删除</button>
+          <button className="primary" style={{ height: "100%" }} onClick={process} disabled={processing}>
+            {processing ? "处理中…" : "一键处理"}
+          </button>
+        </div>
       </div>
       <div className="meta-row">
         <span className={`tag status-${paper.status}`}>{paper.status}</span>
         <span>{paper.source}</span>
+        {paper.tag && <span className="tag">分组：{paper.tag}</span>}
         {paper.year && <span>{paper.year} 年</span>}
         {paper.citations != null && <span>被引 {paper.citations}</span>}
         {paper.doi && <span>DOI: {paper.doi}</span>}

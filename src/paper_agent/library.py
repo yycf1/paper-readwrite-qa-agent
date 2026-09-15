@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS papers (
     status        TEXT NOT NULL DEFAULT 'discovered',
     pdf_path      TEXT,
     error         TEXT,
+    tag           TEXT NOT NULL DEFAULT '',
     added_at      TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -44,13 +45,14 @@ CREATE INDEX IF NOT EXISTS idx_papers_doi ON papers(doi);
 
 @dataclass
 class PaperRecord:
-    """账本里的一行：Paper 元数据 + 流程状态。"""
+    """账本里的一行：Paper 元数据 + 流程状态 + 分组标签。"""
 
     paper: Paper
     status: str
     pdf_path: str | None
     error: str | None
     added_at: str
+    tag: str = ""
 
 
 class Library:
@@ -64,15 +66,24 @@ class Library:
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(_SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """老库原地升级：缺 tag 列时补齐（M10 分组功能）。"""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(papers)")}
+        if "tag" not in cols:
+            self.conn.execute("ALTER TABLE papers ADD COLUMN tag TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
 
     def close(self) -> None:
         self.conn.close()
 
     # ---- 写入 ----
 
-    def upsert_paper(self, paper: Paper) -> bool:
+    def upsert_paper(self, paper: Paper, *, tag: str | None = None) -> bool:
         """入库新论文（status=discovered）；已存在则补充空缺元数据但绝不改变其状态。
 
+        tag 只在首次入库时写入（检索词/上传标记，M10 分组用），已有条目不覆盖。
         返回是否为新论文。补充元数据是幂等的：arXiv/EuropePMC 后到的新链接、
         新摘要会并入已有条目，而已 downloaded/parsed 的状态不受影响。
         """
@@ -92,8 +103,8 @@ class Library:
         self.conn.execute(
             "INSERT OR REPLACE INTO papers (source_id, title, norm_title, authors, abstract,"
             " year, doi, citations, pdf_urls, landing_page, source, abstract_only,"
-            " status, pdf_path, error, added_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " status, pdf_path, error, tag, added_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 paper.source_id,
                 paper.title,
@@ -110,6 +121,7 @@ class Library:
                 status,
                 self._pdf_path_of(paper.source_id) if not is_new else None,
                 None,
+                (tag or "") if is_new else self._tag_of(paper.source_id),
                 now if is_new else self._added_at_of(paper.source_id, now),
                 now,
             ),
@@ -141,14 +153,32 @@ class Library:
         ).fetchone()
         return _to_record(row) if row else None
 
-    def list(self, status: str | None = None) -> list[PaperRecord]:
+    def list(self, status: str | None = None, *, tag: str | None = None) -> list[PaperRecord]:
+        sql = "SELECT * FROM papers"
+        conditions, params = [], []
         if status:
-            rows = self.conn.execute(
-                "SELECT * FROM papers WHERE status = ? ORDER BY added_at DESC", (status,)
-            ).fetchall()
-        else:
-            rows = self.conn.execute("SELECT * FROM papers ORDER BY added_at DESC").fetchall()
-        return [_to_record(r) for r in rows]
+            conditions.append("status = ?")
+            params.append(status)
+        if tag:
+            conditions.append("tag = ?")
+            params.append(tag)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
+        sql += " ORDER BY added_at DESC"
+        return [_to_record(r) for r in self.conn.execute(sql, params).fetchall()]
+
+    def delete(self, source_id: str) -> bool:
+        """删除一条账本记录（向量库与产物文件的清理由调用方负责）。"""
+        cur = self.conn.execute("DELETE FROM papers WHERE source_id = ?", (source_id,))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def tags(self) -> dict[str, int]:
+        """分组标签 → 数量（不含空标签），供前端分组导航。"""
+        rows = self.conn.execute(
+            "SELECT tag, COUNT(*) AS n FROM papers WHERE tag != '' GROUP BY tag ORDER BY n DESC"
+        ).fetchall()
+        return {r["tag"]: r["n"] for r in rows}
 
     def find(self, fragment: str) -> list[str]:
         """按 source_id 片段模糊查找（CLI 允许用户只输入 W274... 或 2401.12345）。"""
@@ -185,6 +215,12 @@ class Library:
         ).fetchone()
         return row["pdf_path"] if row else None
 
+    def _tag_of(self, source_id: str) -> str:
+        row = self.conn.execute(
+            "SELECT tag FROM papers WHERE source_id = ?", (source_id,)
+        ).fetchone()
+        return (row["tag"] if row else "") or ""
+
     def _added_at_of(self, source_id: str, fallback: str) -> str:
         row = self.conn.execute(
             "SELECT added_at FROM papers WHERE source_id = ?", (source_id,)
@@ -219,4 +255,5 @@ def _to_record(row: sqlite3.Row) -> PaperRecord:
         pdf_path=row["pdf_path"],
         error=row["error"],
         added_at=row["added_at"],
+        tag=row["tag"] if "tag" in row.keys() else "",
     )

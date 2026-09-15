@@ -61,7 +61,7 @@ def test_papers_list_filter(monkeypatch, tmp_path):
     assert [p["source_id"] for p in r.json()["papers"]] == ["openalex:W1"]
     r = client.get("/api/papers", params={"q": "cooking"})
     assert [p["source_id"] for p in r.json()["papers"]] == ["openalex:W2"]
-    assert "abstract" not in r.json()["papers"][0]  # 列表不带摘要（省流量）
+    assert r.json()["papers"][0]["abstract"] == ""  # 列表不带摘要内容（省流量）
 
 
 def test_paper_detail_404_and_full(monkeypatch, tmp_path):
@@ -77,32 +77,110 @@ def test_paper_detail_404_and_full(monkeypatch, tmp_path):
     assert data["experiment"] is None  # 尚未分析
 
 
-def test_search_endpoint(monkeypatch, tmp_path):
+def test_search_preview_and_ingest(monkeypatch, tmp_path):
+    """检索预览不写库；选中入库生效，重复候选带标记。"""
+    lib = _seed(tmp_path)
+    client = _client(monkeypatch, tmp_path)
+
+    from paper_agent.services.search import Candidate, PreviewResult
+
+    dup_paper = _paper("openalex:W1", "Graph Neural Survey", doi="10.1/1")  # 库内已有
+    fresh = _paper("openalex:W9", "Fresh GNN Paper")
+
+    def fake_sources(query, *, lib, cfg, **kwargs):
+        assert query == "gnn"
+        return PreviewResult(
+            candidates=[Candidate(paper=dup_paper, duplicate_of="openalex:W1"),
+                        Candidate(paper=fresh, duplicate_of=None)],
+            total_hits=2,
+            notes=["note1"],
+            plan={"topics": ["gnn"], "optimized": True},
+            source_hits={"openalex": 2},
+        )
+
+    monkeypatch.setattr(rt, "search_sources", fake_sources)
+    r = client.post("/api/search", json={"query": "gnn"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total_hits"] == 2 and data["optimized"] is True
+    assert data["candidates"][0]["duplicate_of"] == "openalex:W1"
+    assert data["candidates"][1]["duplicate_of"] is None
+    # 预览不写库：库里没有 W9
+    assert lib.get("openalex:W9") is None
+
+    # 入库所选（含一个重复项：幂等合并）
+    r2 = client.post("/api/papers/ingest", json={
+        "tag": "gnn 调研",
+        "papers": [
+            {"source": "openalex", "source_id": "openalex:W9", "title": "Fresh GNN Paper"},
+            {"source": "openalex", "source_id": "openalex:W1", "title": "Graph Neural Survey", "doi": "10.1/1"},
+        ],
+    })
+    assert r2.status_code == 200
+    out = r2.json()
+    assert out["ingested"] == 1 and out["duplicates"] == 1
+    rec = lib.get("openalex:W9")
+    assert rec is not None and rec.tag == "gnn 调研"  # 入库时打分组标签
+    # 非法源名 → 400
+    def bad_sources(query, **k):
+        raise ValueError("未知数据源：foo")
+
+    monkeypatch.setattr(rt, "search_sources", bad_sources)
+    assert client.post("/api/search", json={"query": "x"}).status_code == 400
+    lib.close()
+
+
+def test_tags_facet(monkeypatch, tmp_path):
+    lib = _seed(tmp_path)
+    lib.upsert_paper(_paper("local:U1", "Uploaded Doc"), tag="本地上传")
+    lib.close()
+    client = _client(monkeypatch, tmp_path)
+    data = client.get("/api/tags").json()
+    assert data["tags"] == {"本地上传": 1}
+    assert data["sources"]["openalex"] == 2
+    # tag 过滤
+    r = client.get("/api/papers", params={"tag": "本地上传"})
+    assert [p["source_id"] for p in r.json()["papers"]] == ["local:U1"]
+
+
+def test_delete_paper(monkeypatch, tmp_path):
+    _seed(tmp_path)
+    client = _client(monkeypatch, tmp_path)
+
+    def fake_delete(sid, *, cfg, lib):
+        return lib.delete(sid)
+
+    monkeypatch.setattr(rt, "delete_paper", fake_delete)
+    assert client.delete("/api/papers/openalex:W2").json()["ok"] is True
+    lib = Library(tmp_path / "data" / "library.db")
+    try:
+        assert lib.get("openalex:W2") is None
+        assert lib.get("openalex:W1") is not None  # 其他论文不受影响
+    finally:
+        lib.close()
+    assert client.delete("/api/papers/openalex:NOPE").status_code == 404
+
+
+def test_upload_paper(monkeypatch, tmp_path):
     lib = _seed(tmp_path)
     lib.close()
     client = _client(monkeypatch, tmp_path)
 
-    from paper_agent.services.search import SearchOutcome
+    def fake_import(path, *, cfg, lib, tag="本地上传"):
+        from paper_agent.models import Paper
 
-    record = Library(tmp_path / "data" / "library.db").get("openalex:W1")
+        paper = Paper(source="local", source_id="local:test-aabbccdd", title="My Local Paper")
+        lib.upsert_paper(paper, tag=tag)
+        lib.set_status("local:test-aabbccdd", "downloaded", pdf_path=str(path))
+        return lib.get("local:test-aabbccdd"), True
 
-    def fake_ingest(query, *, lib, cfg, **kwargs):
-        assert query == "gnn"
-        return SearchOutcome(new_papers=[record], total_hits=5, notes=["note1"],
-                             plan={"topics": ["gnn"], "optimized": True})
-
-    monkeypatch.setattr(rt, "search_and_ingest", fake_ingest)
-    r = client.post("/api/search", json={"query": "gnn"})
-    assert r.status_code == 200
+    monkeypatch.setattr(rt, "import_local_file", fake_import)
+    r = client.post("/api/papers/upload", files={"file": ("my paper.pdf", b"%PDF-fake", "application/pdf")})
+    assert r.status_code == 201
     data = r.json()
-    assert data["total_hits"] == 5 and data["optimized"] is True
-    assert data["new_papers"][0]["source_id"] == "openalex:W1"
-    # 非法源名 → 400
-    def bad_ingest(query, **k):
-        raise ValueError("未知数据源：foo")
-
-    monkeypatch.setattr(rt, "search_and_ingest", bad_ingest)
-    assert client.post("/api/search", json={"query": "x"}).status_code == 400
+    assert data["is_new"] is True
+    assert data["paper"]["source_id"] == "local:test-aabbccdd"
+    assert data["paper"]["status"] == "downloaded"
 
 
 def test_ask_endpoint(monkeypatch, tmp_path):

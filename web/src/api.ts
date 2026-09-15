@@ -10,9 +10,11 @@ export interface Paper {
   citations: number | null;
   has_pdf: boolean;
   landing_page: string | null;
+  abstract_only?: boolean;
   status: string;
   error: string | null;
   added_at: string;
+  tag: string;
   abstract?: string;
 }
 
@@ -47,12 +49,23 @@ export interface StatusSummary {
 }
 
 export interface SearchReply {
-  new_papers: Paper[];
+  candidates: (Paper & { abstract: string; duplicate_of: string | null })[];
   total_hits: number;
   notes: string[];
   source_hits: Record<string, number>;
   topics: string[];
   optimized: boolean;
+}
+
+export interface IngestReply {
+  ingested: number;
+  duplicates: number;
+  papers: Paper[];
+}
+
+export interface TagsReply {
+  tags: Record<string, number>;
+  sources: Record<string, number>;
 }
 
 export interface AskReply {
@@ -102,11 +115,9 @@ async function req<T>(path: string, init?: RequestInit, timeoutMs = 120_000): Pr
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await fetch(`${BASE}/api${path}`, {
-      headers: { "Content-Type": "application/json" },
-      ...init,
-      signal: ctrl.signal,
-    });
+    const headers: Record<string, string> = {};
+    if (!(init?.body instanceof FormData)) headers["Content-Type"] = "application/json";
+    res = await fetch(`${BASE}/api${path}`, { headers, ...init, signal: ctrl.signal });
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") {
       throw new Error("请求超时（LLM 平台响应慢或数据源限流），请稍后重试");
@@ -130,17 +141,43 @@ async function req<T>(path: string, init?: RequestInit, timeoutMs = 120_000): Pr
 
 export const api = {
   status: () => req<StatusSummary>("/status"),
-  papers: (params: { status?: string; q?: string; limit?: number }) => {
+  papers: (params: { status?: string; tag?: string; q?: string; limit?: number }) => {
     const usp = new URLSearchParams();
     Object.entries(params).forEach(([k, v]) => v && usp.set(k, String(v)));
     return req<{ total: number; papers: Paper[] }>(`/papers?${usp}`);
   },
   paper: (id: string) => req<PaperDetail>(`/papers/${encodeURIComponent(id)}`),
-  search: (query: string, year_from?: number | null, max_results = 10) =>
+  deletePaper: (id: string) =>
+    req<{ ok: boolean }>(`/papers/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  tags: () => req<TagsReply>("/tags"),
+  search: (
+    query: string,
+    year_from?: number | null,
+    sources: string[] = ["openalex", "europepmc", "arxiv"],
+    max_results = 10,
+  ) =>
     req<SearchReply>("/search", {
       method: "POST",
-      body: JSON.stringify({ query, year_from: year_from ?? undefined, max_results }),
+      body: JSON.stringify({
+        query,
+        year_from: year_from ?? undefined,
+        sources: sources.join(","),
+        max_results,
+      }),
     }),
+  ingest: (
+    papers: { source: string; source_id: string; title: string; abstract?: string }[],
+    tag: string,
+  ) =>
+    req<IngestReply>("/papers/ingest", {
+      method: "POST",
+      body: JSON.stringify({ papers, tag }),
+    }),
+  upload: (file: File) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    return req<{ is_new: boolean; paper: Paper }>("/papers/upload", { method: "POST", body: fd }, 300_000);
+  },
   ask: (question: string, paper_id?: string) =>
     req<AskReply>("/ask", { method: "POST", body: JSON.stringify({ question, paper_id }) }),
   chat: (message: string, session_id?: string | null) =>
