@@ -77,4 +77,4 @@ API 文档（Swagger）在 <http://127.0.0.1:8000/docs>。
 ## 配置说明
 
 - `config.yaml`：平台 base_url / model、无人值守参数（top_n、年份过滤、下载预算）。切换硅基流动 ↔ 智谱只改此文件。
-- `.env`：存放 API Key（变量名由各端点的 `api_key_env` 指定）。当前 `llm` 用智谱免费档（`ZHIPU_API_KEY`），`embedding` 用硅基流动 BGE-M3（`LLM_API_KEY`）。
+- `.env`：存放 API Key（变量名由各端点的 `api_key_env` 指定）。当前 `llm` 用智谱 `GLM-4.7`（`ZHIPU_API_KEY`），`embedding` 用硅基流动 BGE-M3（`LLM_API_KEY`）；免费档可换回 `GLM-4.7-Flash`。

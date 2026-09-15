@@ -2,9 +2,9 @@
 # 切换 LLM 平台：改 base_url 和 model；API Key 一律放 .env，不写进本文件。
 
 llm:
-  # 智谱 OpenAI 兼容端点；GLM-4.7-Flash 为免费档（200K 上下文）
+  # 智谱 OpenAI 兼容端点；GLM-4.7 为付费档（有额度），GLM-4.7-Flash 为免费档
   base_url: https://open.bigmodel.cn/api/paas/v4
-  model: GLM-4.7-Flash
+  model: GLM-4.7
   api_key_env: ZHIPU_API_KEY
 
 embedding:
